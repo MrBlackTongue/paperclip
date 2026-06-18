@@ -63,6 +63,13 @@ const mockAdapter = vi.hoisted(() => ({
   syncSkills: vi.fn(),
 }));
 
+function expectResponseId(value: unknown): string {
+  expect(value).toEqual(expect.any(String));
+  expect(value).not.toBe("");
+  expect(value).not.toBe("undefined");
+  return String(value);
+}
+
 vi.mock("@paperclipai/shared/telemetry", () => ({
   trackAgentCreated: mockTrackAgentCreated,
   trackErrorHandlerCrash: vi.fn(),
@@ -546,7 +553,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
-    const createdAgentId = String(res.body.id);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentService.create).toHaveBeenCalledWith(
       "company-1",
       expect.objectContaining({
@@ -577,7 +584,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
-    const createdAgentId = String(res.body.id);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(res.body).toMatchObject({
       role: "security",
     });
@@ -612,7 +619,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
-    const createdAgentId = String(res.body.id);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentService.update).toHaveBeenCalledWith(
       createdAgentId,
       expect.objectContaining({
@@ -662,7 +669,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
-    const createdAgentId = String(res.body.id);
+    const createdAgentId = expectResponseId(res.body.id);
     expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
       expect.objectContaining({
         id: createdAgentId,
@@ -690,7 +697,7 @@ describe.sequential("agent skill routes", () => {
       }));
 
     expect([200, 201], JSON.stringify(res.body)).toContain(res.status);
-    const createdAgentId = String(res.body.id);
+    const createdAgentId = expectResponseId(res.body.id);
     await vi.waitFor(() => {
       expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -820,7 +827,7 @@ describe.sequential("agent skill routes", () => {
     const approvalInput = mockApprovalService.create.mock.calls.at(-1)?.[1] as
       | { payload?: { agentId?: string; adapterConfig?: Record<string, unknown> } }
       | undefined;
-    const hiredAgentId = String(approvalInput?.payload?.agentId);
+    const hiredAgentId = expectResponseId(approvalInput?.payload?.agentId);
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       "company-1",
       expect.objectContaining({

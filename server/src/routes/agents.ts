@@ -1152,20 +1152,28 @@ export function agentRoutes(
     return path.resolve(instanceRoot, "companies", companyId, "agents", agentId, "codex-home");
   }
 
+  function normalizeCodexLocalHomePath(rawHome: string): string {
+    if (rawHome === "~") return path.resolve(os.homedir());
+    if (rawHome.startsWith("~/") || rawHome.startsWith("~\\")) {
+      return path.resolve(path.join(os.homedir(), rawHome.slice(2)));
+    }
+    return path.resolve(rawHome);
+  }
+
   function assertCodexLocalHomeIsNotShared(companyId: string, configuredHome: string) {
     const instanceRoot = resolvePaperclipInstanceRootForAdapter({
       homeDir: asNonEmptyString(process.env.PAPERCLIP_HOME) ?? undefined,
       instanceId: asNonEmptyString(process.env.PAPERCLIP_INSTANCE_ID) ?? undefined,
       env: process.env,
     });
-    const normalizedHome = path.resolve(configuredHome);
+    const normalizedHome = normalizeCodexLocalHomePath(configuredHome);
     const sharedHomes = [
       path.resolve(instanceRoot, "companies", companyId, "codex-home"),
       path.resolve(path.join(os.homedir(), ".codex")),
     ];
     const hostCodexHome = asNonEmptyString(process.env.CODEX_HOME);
     if (hostCodexHome) {
-      sharedHomes.push(path.resolve(hostCodexHome));
+      sharedHomes.push(normalizeCodexLocalHomePath(hostCodexHome));
     }
     if (!sharedHomes.some((sharedHome) => sharedHome === normalizedHome)) return;
     throw unprocessable(

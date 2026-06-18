@@ -312,6 +312,7 @@ describe("agent routes adapter validation", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const createInput = mockAgentService.create.mock.calls.at(-1)?.[1] as Record<string, unknown>;
     const agentId = String(createInput.id);
+    expect(agentId).toMatch(/^[0-9a-f-]{36}$/i);
     const adapterConfig = createInput.adapterConfig as Record<string, unknown>;
     const env = adapterConfig.env as Record<string, unknown>;
     expect(env.OPENAI_API_KEY).toBe("");
@@ -351,6 +352,27 @@ describe("agent routes adapter validation", () => {
           adapterConfig: {
             env: {
               CODEX_HOME: path.join(os.homedir(), ".codex"),
+            },
+          },
+        }),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(String(res.body.error)).toContain("codex_local agents must use an isolated adapterConfig.env.CODEX_HOME");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects codex_local agents configured with the ~/.codex alias", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl)
+        .post("/api/companies/company-1/agents")
+        .send({
+          name: "Shared Codex Alias",
+          adapterType: "codex_local",
+          adapterConfig: {
+            env: {
+              CODEX_HOME: "~/.codex",
             },
           },
         }),
