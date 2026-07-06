@@ -320,6 +320,22 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+
+// A heartbeat run holds no live execution/checkout claim once it is gone. It is
+// gone if it is missing, terminal by status, OR has a `finishedAt` timestamp.
+// `finishedAt` is written only together with a terminal transition and is never
+// set on a live status (queued/running/scheduled_retry/deferred_issue_execution
+// keep `finishedAt` null), so a run that can still execute never looks dead.
+// ZOL-6957: runs that died in a non-terminal status (adapter error / finalized
+// without a status transition) otherwise leaked the lock forever, blocking every
+// PATCH/checkout with "Issue run ownership conflict".
+export function heartbeatRunIsDead(
+  run: { status: string; finishedAt: Date | null } | null | undefined,
+): boolean {
+  if (!run) return true;
+  return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status) || run.finishedAt != null;
+}
+
 const ISSUE_LIST_DESCRIPTION_MAX_CHARS = 1200;
 const ISSUE_LIST_DESCRIPTION_MAX_BYTES = ISSUE_LIST_DESCRIPTION_MAX_CHARS * 4;
 
@@ -2314,12 +2330,11 @@ export function issueService(db: Db) {
 
   async function isTerminalOrMissingHeartbeatRun(runId: string) {
     const run = await db
-      .select({ status: heartbeatRuns.status })
+      .select({ status: heartbeatRuns.status, finishedAt: heartbeatRuns.finishedAt })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
-    if (!run) return true;
-    return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
+    return heartbeatRunIsDead(run);
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -2411,11 +2426,11 @@ export function issueService(db: Db) {
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
       );
       const run = await tx
-        .select({ status: heartbeatRuns.status })
+        .select({ status: heartbeatRuns.status, finishedAt: heartbeatRuns.finishedAt })
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, issue.executionRunId))
         .then((rows) => rows[0] ?? null);
-      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+      if (run && !heartbeatRunIsDead(run)) return false;
 
       const updated = await tx
         .update(issues)

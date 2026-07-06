@@ -171,6 +171,55 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     });
   });
 
+  it("recovers an executionRunId held by a finished run stuck in a non-terminal status (ZOL-6957)", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    // A run that died (e.g. adapter error) but whose status never reached the
+    // terminal set, so `activeRun` reads as none yet the lock was never cleared.
+    const deadRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: deadRunId,
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "manual",
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    });
+
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Finished non-terminal lock",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: deadRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered finished non-terminal lock" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const row = await db
+      .select({
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      checkoutRunId: currentRunId,
+      executionRunId: currentRunId,
+    });
+  });
+
   it("allows the rightful assignee to release after the owning run failed", async () => {
     const { companyId, agentId, failedRunId, currentRunId } = await seedCompanyAgentAndRuns();
     const issueId = randomUUID();
