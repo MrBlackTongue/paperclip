@@ -171,6 +171,92 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     });
   });
 
+  it("recovers an executionRunId whose run finished in a non-terminal status (ZOL-6957)", async () => {
+    // Repro: a run that died/finished but whose `status` never reached the
+    // terminal set (e.g. crashed on an adapter error, or was skipped). Before
+    // ZOL-6957 the finishedAt signal was ignored and the lock leaked forever.
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const deadNonTerminalRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: deadNonTerminalRunId,
+      companyId,
+      agentId,
+      status: "skipped",
+      invocationSource: "manual",
+      startedAt: new Date(Date.now() - 60_000),
+      finishedAt: new Date(),
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Finished non-terminal execution lock",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: deadNonTerminalRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Recovered finished non-terminal lock" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const row = await db
+      .select({
+        title: issues.title,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      title: "Recovered finished non-terminal lock",
+      checkoutRunId: currentRunId,
+      executionRunId: currentRunId,
+    });
+  });
+
+  it("still returns 409 when the executionRunId run is non-terminal and not finished", async () => {
+    // Guard against over-reclaiming: a run that is genuinely still live (no
+    // finishedAt, non-terminal status such as scheduled_retry) keeps its claim.
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const liveRunId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: liveRunId,
+      companyId,
+      agentId,
+      status: "scheduled_retry",
+      invocationSource: "manual",
+      startedAt: new Date(),
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Live scheduled retry lock",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: agentId,
+      checkoutRunId: null,
+      executionRunId: liveRunId,
+      executionAgentNameKey: "codexcoder",
+      executionLockedAt: new Date(),
+    });
+
+    const res = await request(createApp(agentActor(companyId, agentId, currentRunId)))
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Should not steal a live claim" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body?.error).toBe("Issue run ownership conflict");
+  });
+
   it("allows the rightful assignee to release after the owning run failed", async () => {
     const { companyId, agentId, failedRunId, currentRunId } = await seedCompanyAgentAndRuns();
     const issueId = randomUUID();
