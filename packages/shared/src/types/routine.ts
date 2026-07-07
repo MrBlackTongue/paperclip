@@ -8,6 +8,7 @@ import type {
   RoutineTriggerSigningMode,
   RoutineVariableType,
 } from "../constants.js";
+import type { IssueAssigneeAdapterOverrides } from "./issue.js";
 
 export interface RoutineProjectSummary {
   id: string;
@@ -59,6 +60,7 @@ export interface Routine {
   concurrencyPolicy: string;
   catchUpPolicy: string;
   variables: RoutineVariable[];
+  assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
   latestRevisionId: string | null;
   latestRevisionNumber: number;
   createdByAgentId: string | null;
@@ -98,6 +100,7 @@ export interface RoutineRevisionSnapshotRoutineV1 {
   concurrencyPolicy: RoutineConcurrencyPolicy;
   catchUpPolicy: RoutineCatchUpPolicy;
   variables: RoutineVariable[];
+  assigneeAdapterOverrides?: IssueAssigneeAdapterOverrides | null;
 }
 
 export interface RoutineRevisionSnapshotTriggerV1 {
