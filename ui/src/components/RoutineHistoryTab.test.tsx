@@ -130,6 +130,7 @@ function createRoutine(overrides: Partial<Routine> = {}): Routine {
     title: "Daily standup digest",
     description: "Summarize standup notes",
     assigneeAgentId: null,
+    assigneeAdapterOverrides: null,
     priority: "medium",
     status: "active",
     concurrencyPolicy: "coalesce_if_active",
