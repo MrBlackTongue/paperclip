@@ -118,6 +118,7 @@ function registerServiceMocks() {
     }),
     issueRecoveryActionService: () => ({
       getActiveForIssue: vi.fn(async () => null),
+      resolveActiveForIssue: vi.fn(async () => null),
       listActiveForIssues: vi.fn(async () => new Map()),
     }),
     issueService: () => mockIssueService,
