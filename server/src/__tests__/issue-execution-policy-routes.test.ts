@@ -85,6 +85,7 @@ function registerModuleMocks() {
     issueRecoveryActionService: () => ({
       getActiveForIssue: vi.fn(async () => null),
       listActiveForIssues: vi.fn(async () => new Map()),
+      resolveActiveForIssue: vi.fn(async () => null),
     }),
     issueService: () => mockIssueService,
     issueThreadInteractionService: () => mockIssueThreadInteractionService,
