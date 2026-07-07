@@ -17,7 +17,7 @@ import { issues } from "./issues.js";
 import { projects } from "./projects.js";
 import { goals } from "./goals.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
-import type { RoutineRevisionSnapshotV1, RoutineVariable } from "@paperclipai/shared";
+import type { IssueAssigneeAdapterOverrides, RoutineRevisionSnapshotV1, RoutineVariable } from "@paperclipai/shared";
 
 export const routines = pgTable(
   "routines",
@@ -35,6 +35,9 @@ export const routines = pgTable(
     concurrencyPolicy: text("concurrency_policy").notNull().default("coalesce_if_active"),
     catchUpPolicy: text("catch_up_policy").notNull().default("skip_missed"),
     variables: jsonb("variables").$type<RoutineVariable[]>().notNull().default([]),
+    // Flag-independent execution-workspace lever inherited by dispatched run-issues
+    // (e.g. useProjectWorkspace=false → agent-home checkout). See ZOL-7132.
+    assigneeAdapterOverrides: jsonb("assignee_adapter_overrides").$type<IssueAssigneeAdapterOverrides>(),
     latestRevisionId: uuid("latest_revision_id"),
     latestRevisionNumber: integer("latest_revision_number").notNull().default(1),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
