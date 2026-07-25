@@ -495,6 +495,7 @@ Side effects:
 - entering `done` sets `completed_at`
 - entering `cancelled` sets `cancelled_at`
 - entering a terminal state makes the linked execution workspace eligible for automatic cleanup once every linked issue is terminal
+- shared execution workspaces archive only their session record; their underlying project workspace is never deleted
 - cleanup waits for the active heartbeat to finish; workspaces with uncommitted files remain available with a recorded cleanup reason instead of being deleted automatically
 
 V1 non-terminal liveness rule:
