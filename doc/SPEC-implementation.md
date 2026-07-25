@@ -486,6 +486,8 @@ Side effects:
 - entering `in_progress` sets `started_at` if null
 - entering `done` sets `completed_at`
 - entering `cancelled` sets `cancelled_at`
+- entering a terminal state archives a linked shared execution-workspace session once every linked issue is terminal
+- archiving a shared session only closes its database record; the project workspace and its runtime services remain available
 
 V1 non-terminal liveness rule:
 

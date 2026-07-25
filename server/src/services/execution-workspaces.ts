@@ -3,7 +3,19 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  ne,
+  notExists,
+  notInArray,
+  or,
+  sql,
+} from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, heartbeatRuns, issueComments, issues, projects, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import type {
@@ -905,6 +917,74 @@ type WorkspaceOverviewIssueRow = WorkspaceOverviewLinkedIssue & {
 export function executionWorkspaceService(db: Db) {
   const recoveryActionsSvc = issueRecoveryActionService(db);
 
+  async function archiveTerminalSharedForIssue(issueId: string) {
+    const issue = await db
+      .select({
+        companyId: issues.companyId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        status: issues.status,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    if (
+      !issue?.executionWorkspaceId
+      || !TERMINAL_ISSUE_STATUSES.has(issue.status)
+    ) {
+      return null;
+    }
+
+    const closedAt = new Date();
+    const archived = await db
+      .update(executionWorkspaces)
+      .set({
+        status: "archived",
+        closedAt,
+        cleanupEligibleAt: null,
+        cleanupReason: null,
+        updatedAt: closedAt,
+      })
+      .where(
+        and(
+          eq(executionWorkspaces.id, issue.executionWorkspaceId),
+          eq(executionWorkspaces.companyId, issue.companyId),
+          eq(executionWorkspaces.mode, "shared_workspace"),
+          inArray(executionWorkspaces.status, ["active", "idle", "in_review", "cleanup_failed"]),
+          notExists(
+            db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(
+                and(
+                  eq(issues.companyId, issue.companyId),
+                  eq(issues.executionWorkspaceId, issue.executionWorkspaceId),
+                  notInArray(issues.status, ["done", "cancelled"]),
+                ),
+              ),
+          ),
+        ),
+      )
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!archived) return null;
+
+    await db
+      .update(issues)
+      .set({
+        executionWorkspaceId: null,
+        updatedAt: closedAt,
+      })
+      .where(
+        and(
+          eq(issues.companyId, issue.companyId),
+          eq(issues.executionWorkspaceId, archived.id),
+          inArray(issues.status, ["done", "cancelled"]),
+        ),
+      );
+
+    return toExecutionWorkspace(archived);
+  }
+
   function buildListConditions(
     companyId: string,
     filters?: {
@@ -947,6 +1027,7 @@ export function executionWorkspaceService(db: Db) {
   }
 
   return {
+    archiveTerminalSharedForIssue,
     listOverview: async (
       companyId: string,
       filters: WorkspaceOverviewQuery,

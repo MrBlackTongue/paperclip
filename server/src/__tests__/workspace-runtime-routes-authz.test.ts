@@ -14,6 +14,7 @@ const mockProjectService = vi.hoisted(() => ({
 
 const mockExecutionWorkspaceService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getCloseReadiness: vi.fn(),
   update: vi.fn(),
 }));
 
@@ -34,6 +35,9 @@ const mockAccessService = vi.hoisted(() => ({
 }));
 const mockAssertCanManageProjectWorkspaceRuntimeServices = vi.hoisted(() => vi.fn());
 const mockAssertCanManageExecutionWorkspaceRuntimeServices = vi.hoisted(() => vi.fn());
+const mockCleanupExecutionWorkspaceArtifacts = vi.hoisted(() => vi.fn());
+const mockStopRuntimeServicesForExecutionWorkspace = vi.hoisted(() => vi.fn());
+const mockDestroyReusableSandboxLeases = vi.hoisted(() => vi.fn());
 
 vi.mock("../telemetry.js", () => ({
   getTelemetryClient: mockGetTelemetryClient,
@@ -51,10 +55,16 @@ vi.mock("../services/index.js", () => ({
 }));
 
 vi.mock("../services/workspace-runtime.js", () => ({
-  cleanupExecutionWorkspaceArtifacts: vi.fn(),
+  cleanupExecutionWorkspaceArtifacts: mockCleanupExecutionWorkspaceArtifacts,
   startRuntimeServicesForWorkspaceControl: vi.fn(),
-  stopRuntimeServicesForExecutionWorkspace: vi.fn(),
+  stopRuntimeServicesForExecutionWorkspace: mockStopRuntimeServicesForExecutionWorkspace,
   stopRuntimeServicesForProjectWorkspace: vi.fn(),
+}));
+
+vi.mock("../services/environment-runtime.js", () => ({
+  environmentRuntimeService: () => ({
+    destroyReusableSandboxLeases: mockDestroyReusableSandboxLeases,
+  }),
 }));
 
 vi.mock("../routes/workspace-runtime-service-authz.js", () => ({
@@ -79,10 +89,16 @@ function registerWorkspaceRouteMocks() {
   }));
 
   vi.doMock("../services/workspace-runtime.js", () => ({
-    cleanupExecutionWorkspaceArtifacts: vi.fn(),
+    cleanupExecutionWorkspaceArtifacts: mockCleanupExecutionWorkspaceArtifacts,
     startRuntimeServicesForWorkspaceControl: vi.fn(),
-    stopRuntimeServicesForExecutionWorkspace: vi.fn(),
+    stopRuntimeServicesForExecutionWorkspace: mockStopRuntimeServicesForExecutionWorkspace,
     stopRuntimeServicesForProjectWorkspace: vi.fn(),
+  }));
+
+  vi.doMock("../services/environment-runtime.js", () => ({
+    environmentRuntimeService: () => ({
+      destroyReusableSandboxLeases: mockDestroyReusableSandboxLeases,
+    }),
   }));
 
   vi.doMock("../routes/workspace-runtime-service-authz.js", () => ({
@@ -128,7 +144,14 @@ async function createExecutionWorkspaceApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api", executionWorkspaceRoutes({} as any));
+  const db = {
+    update: vi.fn(() => ({
+      set: vi.fn(() => ({
+        where: vi.fn().mockResolvedValue([]),
+      })),
+    })),
+  };
+  app.use("/api", executionWorkspaceRoutes(db as any));
   app.use(errorHandler);
   return app;
 }
@@ -281,6 +304,11 @@ describe.sequential("workspace runtime service route authorization", () => {
       updatedAt: new Date(),
     });
     mockExecutionWorkspaceService.update.mockResolvedValue(buildExecutionWorkspace());
+    mockExecutionWorkspaceService.getCloseReadiness.mockResolvedValue({
+      state: "ready",
+      blockingReasons: [],
+    });
+    mockDestroyReusableSandboxLeases.mockResolvedValue(undefined);
     mockAssertCanManageProjectWorkspaceRuntimeServices.mockResolvedValue(undefined);
     mockAssertCanManageExecutionWorkspaceRuntimeServices.mockResolvedValue(undefined);
   });
@@ -539,5 +567,49 @@ describe.sequential("workspace runtime service route authorization", () => {
     expect(res.status).toBe(404);
     expect(res.body.error).toContain("Execution workspace not found");
     expect(mockExecutionWorkspaceService.getById).toHaveBeenCalledWith(executionWorkspaceId);
+  });
+
+  it("archives a shared execution workspace without stopping services or cleaning its directory", async () => {
+    const sharedWorkspace = buildExecutionWorkspace({
+      id: executionWorkspaceId,
+      mode: "shared_workspace",
+      projectWorkspaceId: workspaceId,
+      cwd: "/tmp/project",
+    });
+    mockExecutionWorkspaceService.getById.mockResolvedValue(sharedWorkspace);
+    mockExecutionWorkspaceService.update.mockResolvedValue(buildExecutionWorkspace({
+      ...sharedWorkspace,
+      status: "archived",
+      closedAt: new Date(),
+    }));
+    const app = await createExecutionWorkspaceApp({
+      type: "board",
+      userId: "board-1",
+      companyIds: ["company-1"],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .patch(`/api/execution-workspaces/${executionWorkspaceId}`)
+      .send({ status: "archived" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("archived");
+    expect(mockExecutionWorkspaceService.update).toHaveBeenCalledWith(
+      executionWorkspaceId,
+      expect.objectContaining({
+        status: "archived",
+        cleanupReason: null,
+      }),
+    );
+    expect(mockDestroyReusableSandboxLeases).toHaveBeenCalledWith({
+      companyId: "company-1",
+      executionWorkspaceId,
+      failureReason: "execution_workspace_closed",
+    });
+    expect(mockStopRuntimeServicesForExecutionWorkspace).not.toHaveBeenCalled();
+    expect(mockCleanupExecutionWorkspaceArtifacts).not.toHaveBeenCalled();
+    expect(mockWorkspaceOperationService).not.toHaveProperty("createRecorder");
   });
 });

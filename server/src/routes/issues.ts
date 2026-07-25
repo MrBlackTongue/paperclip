@@ -4395,6 +4395,34 @@ export function issueRoutes(
     }
   }
 
+  async function archiveTerminalSharedWorkspaceForIssue(
+    issue: {
+      id: string;
+      identifier: string | null;
+    },
+    actor: ReturnType<typeof getActorInfo>,
+  ) {
+    const archivedWorkspace = await executionWorkspacesSvc.archiveTerminalSharedForIssue(issue.id);
+    if (!archivedWorkspace) return;
+
+    await logActivity(db, {
+      companyId: archivedWorkspace.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
+      action: "execution_workspace.terminal_shared_issue_archived",
+      entityType: "execution_workspace",
+      entityId: archivedWorkspace.id,
+      details: {
+        issueId: issue.id,
+        identifier: issue.identifier,
+        source: "terminal_issue",
+      },
+    });
+  }
+
   async function resolveIssueRouteId(rawId: string): Promise<string> {
     const identifier = normalizeIssueReferenceIdentifier(rawId);
     if (identifier) {
@@ -8900,6 +8928,7 @@ export function issueRoutes(
         !["done", "cancelled"].includes(existing.status) && ["done", "cancelled"].includes(issue.status);
       if (becameTerminal) {
         await destroyReusableSandboxLeasesForTerminalIssue(issue);
+        await archiveTerminalSharedWorkspaceForIssue(issue, actor);
       }
       if (becameTerminal && issue.parentId) {
         const parent = await svc.getWakeableParentAfterChildCompletion(issue.parentId);
@@ -10430,6 +10459,7 @@ export function issueRoutes(
         ["done", "cancelled"].includes(currentIssue.status);
       if (becameTerminal) {
         await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
+        await archiveTerminalSharedWorkspaceForIssue(currentIssue, actor);
       }
       if (becameTerminal && currentIssue.parentId) {
         const parent = await svc.getWakeableParentAfterChildCompletion(currentIssue.parentId);
