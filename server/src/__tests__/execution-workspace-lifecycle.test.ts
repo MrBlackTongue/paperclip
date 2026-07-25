@@ -70,7 +70,10 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     await tempDb?.cleanup();
   });
 
-  async function createFixture(statuses: Array<"done" | "in_review">) {
+  async function createFixture(
+    statuses: Array<"done" | "in_review">,
+    mode: "isolated_workspace" | "shared_workspace" = "isolated_workspace",
+  ) {
     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-terminal-workspace-"));
     tempDirs.add(repoRoot);
     await runGit(repoRoot, ["init"]);
@@ -81,11 +84,15 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     await runGit(repoRoot, ["commit", "-m", "Initial commit"]);
     await runGit(repoRoot, ["branch", "-M", "main"]);
 
-    const worktreePath = path.join(path.dirname(repoRoot), `paperclip-terminal-worktree-${randomUUID()}`);
-    tempDirs.add(worktreePath);
-    const branchName = `terminal-cleanup-${randomUUID()}`;
-    await runGit(repoRoot, ["branch", branchName]);
-    await runGit(repoRoot, ["worktree", "add", worktreePath, branchName]);
+    const worktreePath = mode === "shared_workspace"
+      ? repoRoot
+      : path.join(path.dirname(repoRoot), `paperclip-terminal-worktree-${randomUUID()}`);
+    const branchName = mode === "shared_workspace" ? null : `terminal-cleanup-${randomUUID()}`;
+    if (branchName) {
+      tempDirs.add(worktreePath);
+      await runGit(repoRoot, ["branch", branchName]);
+      await runGit(repoRoot, ["worktree", "add", worktreePath, branchName]);
+    }
 
     const companyId = randomUUID();
     const projectId = randomUUID();
@@ -121,16 +128,16 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       companyId,
       projectId,
       projectWorkspaceId,
-      mode: "isolated_workspace",
-      strategyType: "git_worktree",
+      mode,
+      strategyType: mode === "shared_workspace" ? "project_primary" : "git_worktree",
       name: "Terminal workspace",
       status: "active",
       cwd: worktreePath,
-      providerType: "git_worktree",
-      providerRef: worktreePath,
+      providerType: mode === "shared_workspace" ? "local_fs" : "git_worktree",
+      providerRef: mode === "shared_workspace" ? null : worktreePath,
       branchName,
       baseRef: "main",
-      metadata: { createdByRuntime: true },
+      metadata: { createdByRuntime: mode !== "shared_workspace" },
     });
     const issueIds = statuses.map(() => randomUUID());
     await db.insert(issues).values(statuses.map((status, index) => ({
@@ -178,6 +185,32 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       .then((rows) => rows[0]);
     expect(workspace.status).toBe("archived");
     expect(workspace.cleanupEligibleAt).toBeNull();
+  }, 20_000);
+
+  it("archives a shared session without deleting the project workspace", async () => {
+    const fixture = await createFixture(["done"], "shared_workspace");
+
+    const cleaned = await lifecycle.finishDeferredCleanup({
+      issueId: fixture.issueIds[0],
+      actor,
+    });
+
+    expect(cleaned.outcome).toBe("archived");
+    expect(await pathExists(fixture.worktreePath)).toBe(true);
+
+    const workspace = await db
+      .select()
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId))
+      .then((rows) => rows[0]);
+    expect(workspace.status).toBe("archived");
+
+    const issue = await db
+      .select({ executionWorkspaceId: issues.executionWorkspaceId })
+      .from(issues)
+      .where(eq(issues.id, fixture.issueIds[0]))
+      .then((rows) => rows[0]);
+    expect(issue.executionWorkspaceId).toBeNull();
   }, 20_000);
 
   it("waits until every issue linked to an inherited workspace is terminal", async () => {
