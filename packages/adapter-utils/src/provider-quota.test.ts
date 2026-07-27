@@ -3,7 +3,7 @@ import {
   classifyProviderQuota,
   extractProviderQuotaRetryNotBefore,
   isProviderQuotaMessage,
-} from "./provider-quota.ts";
+} from "./provider-quota.js";
 
 // The exact string the Claude backend returns through the ACPX engine when a
 // session limit is hit; it reached the server classified as a generic turn
