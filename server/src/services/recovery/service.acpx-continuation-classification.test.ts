@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyContinuationFailure } from "./service.js";
+import {
+  classifyContinuationFailure,
+  CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS,
+  CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS,
+} from "./service.js";
 
 const run = (errorCode: string | null) =>
   ({ errorCode } as unknown as Parameters<typeof classifyContinuationFailure>[0]);
@@ -31,5 +35,18 @@ describe("ACPX continuation retry classification", () => {
 
   it("keeps non-retryable codes non-retryable", () => {
     expect(classifyContinuationFailure(run("budget_exhausted")).kind).toBe("non_retryable");
+  });
+});
+
+describe("Transient retry configuration parsing", () => {
+  it("exports finite integer max-attempts (default 3)", () => {
+    expect(Number.isFinite(CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS)).toBe(true);
+    expect(Number.isInteger(CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS)).toBe(true);
+    expect(CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS).toBeGreaterThanOrEqual(1);
+  });
+
+  it("exports finite backoff >= 1000 ms (default 60 000)", () => {
+    expect(Number.isFinite(CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS)).toBe(true);
+    expect(CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS).toBeGreaterThanOrEqual(1_000);
   });
 });

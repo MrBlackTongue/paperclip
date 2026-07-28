@@ -311,14 +311,24 @@ const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
 // behind flaky upstreams need more headroom than the built-in default; overriding the
 // budget must not be an all-or-nothing `HEARTBEAT_SCHEDULER_ENABLED=false`. Floored at
 // 1 attempt so a misconfigured value cannot disable continuation recovery entirely.
-export const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = Math.max(
-  1,
-  Number(process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS) || 3,
+// Non-finite or non-integer values are rejected in favour of the default (3) so that
+// Infinity or a fractional count cannot produce an unbounded or subtly wrong budget.
+function parseTransientMaxAttempts(raw: string | undefined): number {
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 1) return parsed;
+  return 3;
+}
+function parseTransientBackoffMs(raw: string | undefined): number {
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed >= 1_000) return parsed;
+  return 60_000;
+}
+export const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = parseTransientMaxAttempts(
+  process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS,
 );
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
-export const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = Math.max(
-  1_000,
-  Number(process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS) || 60_000,
+export const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = parseTransientBackoffMs(
+  process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS,
 );
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
@@ -3175,31 +3185,60 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
   }) {
+    // Only close when the transient retry budget is genuinely exhausted. Escalation
+    // paths (interaction-continuation limit, single failed assignment-recovery) can
+    // reach this function after fewer retries than the configured budget; cancelling
+    // early would misattribute the cause and skip the normal recovery flow.
+    const classification = classifyContinuationFailure(input.latestRun);
+    if (classification.kind === "transient_infra") {
+      const agentId = input.latestRun?.agentId ?? input.issue.assigneeAgentId;
+      if (agentId) {
+        const { consecutive } = await summarizeRecentContinuationRetries(
+          input.issue.companyId,
+          input.issue.id,
+          agentId,
+          classification.errorCode,
+        );
+        if (consecutive < classification.maxAttempts) return null;
+      }
+    }
+
     const errorCode = readNonEmptyString(input.latestRun?.errorCode);
     const causeCopy = errorCode ? ` (\`${errorCode}\`)` : "";
     const failureReason =
       `Routine execution lost its live execution path to a transient infrastructure failure${causeCopy}` +
       " after the continuation retry budget was exhausted.";
 
-    const updated = await issuesSvc.update(input.issue.id, { status: "cancelled" });
-    if (!updated) return null;
+    // Update issue and routine run atomically so a partial failure cannot leave the
+    // issue cancelled while its linked run remains in a non-terminal state.
+    const updated = await db.transaction(async (tx) => {
+      const rows = await tx
+        .update(issues)
+        .set({ status: "cancelled", updatedAt: new Date() })
+        .where(eq(issues.id, input.issue.id))
+        .returning();
+      const updatedIssue = rows[0];
+      if (!updatedIssue) return null;
 
-    if (input.issue.originRunId) {
-      await db
-        .update(routineRuns)
-        .set({
-          status: "failed",
-          failureReason,
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(routineRuns.id, input.issue.originRunId),
-            notInArray(routineRuns.status, ["completed", "failed"]),
-          ),
-        );
-    }
+      if (input.issue.originRunId) {
+        await tx
+          .update(routineRuns)
+          .set({
+            status: "failed",
+            failureReason,
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(routineRuns.id, input.issue.originRunId),
+              notInArray(routineRuns.status, ["completed", "failed"]),
+            ),
+          );
+      }
+      return updatedIssue;
+    });
+    if (!updated) return null;
 
     await issuesSvc.addComment(
       input.issue.id,
