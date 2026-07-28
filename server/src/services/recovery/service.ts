@@ -3185,29 +3185,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
   }) {
-    // Only close when the transient retry budget is genuinely exhausted. Escalation
-    // paths (interaction-continuation limit, single failed assignment-recovery) can
-    // reach this function after fewer retries than the configured budget; cancelling
-    // early would misattribute the cause and skip the normal recovery flow.
-    const classification = classifyContinuationFailure(input.latestRun);
-    if (classification.kind === "transient_infra") {
-      const agentId = input.latestRun?.agentId ?? input.issue.assigneeAgentId;
-      if (agentId) {
-        const { consecutive } = await summarizeRecentContinuationRetries(
-          input.issue.companyId,
-          input.issue.id,
-          agentId,
-          classification.errorCode,
-        );
-        if (consecutive < classification.maxAttempts) return null;
-      }
-    }
-
+    // Routine execution issues are one-shot scheduled firings, not standing work.
+    // There is no retry budget to exhaust: retrying a routine execution issue would
+    // only duplicate the firing, while the next scheduled run already supersedes
+    // the miss. Cancel immediately so dead cards do not accumulate in the queue.
     const errorCode = readNonEmptyString(input.latestRun?.errorCode);
     const causeCopy = errorCode ? ` (\`${errorCode}\`)` : "";
     const failureReason =
-      `Routine execution lost its live execution path to a transient infrastructure failure${causeCopy}` +
-      " after the continuation retry budget was exhausted.";
+      `Routine execution lost its live execution path to a transient infrastructure failure${causeCopy}.` +
+      " The next scheduled firing supersedes this miss.";
 
     // Update issue and routine run atomically so a partial failure cannot leave the
     // issue cancelled while its linked run remains in a non-terminal state.
