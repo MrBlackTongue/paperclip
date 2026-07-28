@@ -24,6 +24,7 @@ import {
   issueRelations,
   issueThreadInteractions,
   issues,
+  routineRuns,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
@@ -278,6 +279,16 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
   "claude_transient_upstream",
   "provider_quota",
   "timeout",
+  // ACPX engine phase failures are the adapter-level equivalent of `adapter_failed`:
+  // the ACP session or turn died on the transport (dropped socket, backend killed
+  // mid-turn, provider tokens exhausted), not because the issue lost its execution
+  // path. Without these the ACPX adapters fall into the `default` bucket, get a
+  // single retry, and are escalated to `blocked` on the first infrastructure blip.
+  "acpx_session_init_failed",
+  "acpx_session_config_failed",
+  "acpx_turn_failed",
+  "acpx_backend_unavailable",
+  "acpx_timeout",
 ]);
 
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
@@ -296,9 +307,19 @@ const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
 const CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE = "issue_continuation_waiting_on_review";
 const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
 
-const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
+// Retry budget for transient infrastructure failures. Deployments whose adapters sit
+// behind flaky upstreams need more headroom than the built-in default; overriding the
+// budget must not be an all-or-nothing `HEARTBEAT_SCHEDULER_ENABLED=false`. Floored at
+// 1 attempt so a misconfigured value cannot disable continuation recovery entirely.
+export const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS) || 3,
+);
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
-const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
+export const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = Math.max(
+  1_000,
+  Number(process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS) || 60_000,
+);
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
 const PROVIDER_QUOTA_ERROR_RE =
@@ -563,6 +584,12 @@ function unwrapDatabaseConflictError(error: unknown) {
 
 function isStrandedIssueRecoveryIssue(issue: Pick<typeof issues.$inferSelect, "originKind">) {
   return isStrandedIssueRecoveryOriginKind(issue.originKind);
+}
+
+const ROUTINE_EXECUTION_ORIGIN_KIND = "routine_execution";
+
+function isRoutineExecutionIssue(issue: Pick<typeof issues.$inferSelect, "originKind">) {
+  return issue.originKind === ROUTINE_EXECUTION_ORIGIN_KIND;
 }
 
 function isUnsuccessfulTerminalIssueRun(latestRun: LatestIssueRun) {
@@ -3143,6 +3170,69 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return updated;
   }
 
+  async function closeRoutineExecutionAfterTransientInfraFailure(input: {
+    issue: typeof issues.$inferSelect;
+    previousStatus: StrandedPreviousStatus;
+    latestRun: LatestIssueRun;
+  }) {
+    const errorCode = readNonEmptyString(input.latestRun?.errorCode);
+    const causeCopy = errorCode ? ` (\`${errorCode}\`)` : "";
+    const failureReason =
+      `Routine execution lost its live execution path to a transient infrastructure failure${causeCopy}` +
+      " after the continuation retry budget was exhausted.";
+
+    const updated = await issuesSvc.update(input.issue.id, { status: "cancelled" });
+    if (!updated) return null;
+
+    if (input.issue.originRunId) {
+      await db
+        .update(routineRuns)
+        .set({
+          status: "failed",
+          failureReason,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(routineRuns.id, input.issue.originRunId),
+            notInArray(routineRuns.status, ["completed", "failed"]),
+          ),
+        );
+    }
+
+    await issuesSvc.addComment(
+      input.issue.id,
+      `${failureReason} Paperclip cancelled this firing instead of blocking it: there is no ` +
+        "blocker for a recovery owner to clear, and the next scheduled firing supersedes the miss.",
+      {},
+      { authorType: "system" },
+    );
+
+    await logActivity(db, {
+      companyId: input.issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: input.issue.id,
+      details: {
+        identifier: input.issue.identifier,
+        status: "cancelled",
+        previousStatus: input.previousStatus,
+        source: "recovery.close_routine_execution_transient_infra_failure",
+        latestRunId: input.latestRun?.id ?? null,
+        latestRunStatus: input.latestRun?.status ?? null,
+        latestRunErrorCode: errorCode,
+        routineRunId: input.issue.originRunId ?? null,
+      },
+    });
+
+    return updated;
+  }
+
   async function escalateStrandedAssignedIssue(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
@@ -3158,6 +3248,24 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         previousStatus: input.previousStatus,
         latestRun: input.latestRun,
       });
+    }
+
+    // A routine execution issue is one scheduled firing, not standing work. When its
+    // run is lost to infrastructure there is nothing for a recovery owner to unblock:
+    // the next scheduled firing supersedes the miss. Blocking it instead parks a
+    // permanently dead card that list queries hide by default, so the misses pile up
+    // invisibly. Close the firing and mark the routine run failed with the cause.
+    if (
+      !input.recoveryCause &&
+      isRoutineExecutionIssue(input.issue) &&
+      classifyContinuationFailure(input.latestRun).kind === "transient_infra"
+    ) {
+      const closed = await closeRoutineExecutionAfterTransientInfraFailure({
+        issue: input.issue,
+        previousStatus: input.previousStatus,
+        latestRun: input.latestRun,
+      });
+      if (closed) return closed;
     }
 
     const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
