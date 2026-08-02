@@ -13813,6 +13813,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         cleanupReason: null,
       });
     }
+    // Прогон завёл новую shared-сессию: записи прежних прогонов по этой же задаче
+    // закрываем сразу, иначе они копятся по одной на прогон и никогда не закрываются.
+    if (issueId && persistedExecutionWorkspace?.mode === "shared_workspace") {
+      try {
+        await executionWorkspaceLifecycle.archiveSupersededSharedSessionsForIssue({
+          companyId: agent.companyId,
+          issueId,
+          keepWorkspaceId: persistedExecutionWorkspace.id,
+          actor: { actorType: "agent", actorId: agent.id, agentId: agent.id, runId: run.id },
+        });
+      } catch (error) {
+        logger.warn(
+          { err: error, issueId, executionWorkspaceId: persistedExecutionWorkspace.id },
+          "failed to archive superseded shared execution workspace sessions",
+        );
+      }
+    }
     if (issueId && persistedExecutionWorkspace) {
       const nextIssueWorkspaceMode = issueExecutionWorkspaceModeForPersistedWorkspace(persistedExecutionWorkspace.mode);
       const shouldSwitchIssueToExistingWorkspace =

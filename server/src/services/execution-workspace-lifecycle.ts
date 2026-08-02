@@ -67,6 +67,7 @@ async function archiveExecutionWorkspace(
   db: Db,
   workspace: ExecutionWorkspace,
   actor: CleanupActor,
+  source: "terminal_issue" | "superseded_session" = "terminal_issue",
 ): Promise<TerminalWorkspaceCleanupResult> {
   const svc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
@@ -179,9 +180,56 @@ async function archiveExecutionWorkspace(
   await writeLifecycleActivity(db, archivedWorkspace, actor, "execution_workspace.terminal_issue_cleanup", {
     outcome,
     cleanupWarnings,
-    source: "terminal_issue",
+    source,
   });
   return { outcome, workspace: archivedWorkspace, warnings: cleanupWarnings };
+}
+
+/**
+ * Каждый прогон по задаче заводит собственную запись shared_workspace, а закрывалась
+ * до сих пор только та, на которую смотрит issues.execution_workspace_id. Записи
+ * прежних прогонов оставались открытыми навсегда: на 252 задачи приходилось 870
+ * незакрытых записей, до 45 на одну задачу. Shared-сессия не владеет каталогом на
+ * диске (см. ранний возврат в cleanupExecutionWorkspaceArtifacts), поэтому закрытие
+ * вытесненной записи — это закрытие только записи.
+ */
+async function archiveSupersededSharedSessions(
+  db: Db,
+  input: {
+    companyId: string;
+    sourceIssueId: string;
+    keepWorkspaceId: string | null;
+    actor: CleanupActor;
+  },
+): Promise<string[]> {
+  const svc = executionWorkspaceService(db);
+  const rows = await db
+    .select({ id: executionWorkspaces.id })
+    .from(executionWorkspaces)
+    .where(
+      and(
+        eq(executionWorkspaces.companyId, input.companyId),
+        eq(executionWorkspaces.sourceIssueId, input.sourceIssueId),
+        eq(executionWorkspaces.mode, "shared_workspace"),
+        inArray(executionWorkspaces.status, ["active", "idle", "in_review"]),
+      ),
+    );
+  const archivedIds: string[] = [];
+  for (const row of rows) {
+    if (input.keepWorkspaceId && row.id === input.keepWorkspaceId) continue;
+    const workspace = await svc.getById(row.id);
+    if (!workspace) continue;
+    try {
+      const result = await archiveExecutionWorkspace(db, workspace, input.actor, "superseded_session");
+      if (result.outcome === "archived") archivedIds.push(row.id);
+    } catch (error) {
+      logger.warn(
+        { err: error, executionWorkspaceId: row.id, sourceIssueId: input.sourceIssueId },
+        "failed to archive superseded shared execution workspace session",
+      );
+    }
+  }
+  return archivedIds;
 }
 
 export function executionWorkspaceLifecycleService(db: Db) {
@@ -201,7 +249,20 @@ export function executionWorkspaceLifecycleService(db: Db) {
       .from(issues)
       .where(eq(issues.id, input.issueId))
       .then((rows) => rows[0] ?? null);
-    if (!issue?.executionWorkspaceId || !TERMINAL_ISSUE_STATUSES.has(issue.status)) {
+    if (!issue || !TERMINAL_ISSUE_STATUSES.has(issue.status)) {
+      return { outcome: "not_applicable", workspace: null };
+    }
+    // Задача терминальная — записи прежних прогонов по ней больше никому не нужны,
+    // независимо от того, на какую из них смотрит issues.execution_workspace_id.
+    if (!input.defer) {
+      await archiveSupersededSharedSessions(db, {
+        companyId: issue.companyId,
+        sourceIssueId: input.issueId,
+        keepWorkspaceId: issue.executionWorkspaceId,
+        actor: input.actor,
+      });
+    }
+    if (!issue.executionWorkspaceId) {
       return { outcome: "not_applicable", workspace: null };
     }
 
@@ -264,8 +325,27 @@ export function executionWorkspaceLifecycleService(db: Db) {
     }
   }
 
+  /**
+   * Вызывается при заведении новой shared-сессии: закрывает записи прежних прогонов
+   * по этой же задаче, оставляя открытой только текущую.
+   */
+  async function archiveSupersededSharedSessionsForIssue(input: {
+    companyId: string;
+    issueId: string;
+    keepWorkspaceId: string;
+    actor: CleanupActor;
+  }): Promise<string[]> {
+    return archiveSupersededSharedSessions(db, {
+      companyId: input.companyId,
+      sourceIssueId: input.issueId,
+      keepWorkspaceId: input.keepWorkspaceId,
+      actor: input.actor,
+    });
+  }
+
   return {
     reconcileTerminalIssueWorkspace,
     finishDeferredCleanup,
+    archiveSupersededSharedSessionsForIssue,
   };
 }

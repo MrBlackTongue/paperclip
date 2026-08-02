@@ -150,7 +150,40 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       executionWorkspaceId,
     })));
 
-    return { executionWorkspaceId, issueIds, worktreePath };
+    return { companyId, projectId, projectWorkspaceId, executionWorkspaceId, issueIds, worktreePath };
+  }
+
+  /** Запись shared-сессии прежнего прогона: та же задача, свой id, ссылки из задачи на неё нет. */
+  async function insertPriorSharedSession(
+    fixture: { companyId: string; projectId: string; projectWorkspaceId: string; worktreePath: string },
+    sourceIssueId: string,
+  ) {
+    const id = randomUUID();
+    await db.insert(executionWorkspaces).values({
+      id,
+      companyId: fixture.companyId,
+      projectId: fixture.projectId,
+      projectWorkspaceId: fixture.projectWorkspaceId,
+      sourceIssueId,
+      mode: "shared_workspace",
+      strategyType: "project_primary",
+      name: "Prior run session",
+      status: "active",
+      cwd: fixture.worktreePath,
+      providerType: "local_fs",
+      providerRef: null,
+      baseRef: "main",
+      metadata: { createdByRuntime: false },
+    });
+    return id;
+  }
+
+  async function statusOf(executionWorkspaceId: string) {
+    return db
+      .select({ status: executionWorkspaces.status })
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, executionWorkspaceId))
+      .then((rows) => rows[0]?.status ?? null);
   }
 
   const actor = {
@@ -257,6 +290,47 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       .from(activityLog)
       .where(eq(activityLog.action, "execution_workspace.terminal_issue_cleanup"));
     expect(cleanupActivities).toHaveLength(1);
+  }, 20_000);
+
+  it("archives shared sessions of previous runs and keeps the current one", async () => {
+    const fixture = await createFixture(["in_review"], "shared_workspace");
+    const priorA = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
+    const priorB = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
+
+    const archived = await lifecycle.archiveSupersededSharedSessionsForIssue({
+      companyId: fixture.companyId,
+      issueId: fixture.issueIds[0],
+      keepWorkspaceId: fixture.executionWorkspaceId,
+      actor,
+    });
+
+    expect(archived.sort()).toEqual([priorA, priorB].sort());
+    expect(await statusOf(priorA)).toBe("archived");
+    expect(await statusOf(priorB)).toBe("archived");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
+    expect(await pathExists(fixture.worktreePath)).toBe(true);
+
+    const issue = await db
+      .select({ executionWorkspaceId: issues.executionWorkspaceId })
+      .from(issues)
+      .where(eq(issues.id, fixture.issueIds[0]))
+      .then((rows) => rows[0]);
+    expect(issue.executionWorkspaceId).toBe(fixture.executionWorkspaceId);
+  }, 20_000);
+
+  it("archives shared sessions of previous runs when the issue reaches a terminal status", async () => {
+    const fixture = await createFixture(["done"], "shared_workspace");
+    const prior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
+
+    const cleaned = await lifecycle.finishDeferredCleanup({
+      issueId: fixture.issueIds[0],
+      actor,
+    });
+
+    expect(cleaned.outcome).toBe("archived");
+    expect(await statusOf(prior)).toBe("archived");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("archived");
+    expect(await pathExists(fixture.worktreePath)).toBe(true);
   }, 20_000);
 
   it("keeps a dirty terminal workspace and records why automatic cleanup was skipped", async () => {
