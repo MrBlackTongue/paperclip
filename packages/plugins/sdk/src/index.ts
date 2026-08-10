@@ -94,6 +94,7 @@ export type {
   PluginDefinition,
   PaperclipPlugin,
   PluginHealthDiagnostics,
+  PluginConfigChangeContext,
   PluginConfigValidationResult,
   PluginWebhookInput,
   PluginApiRequestInput,
@@ -181,6 +182,26 @@ export type {
   PluginEnvironmentRealizeWorkspaceResult,
   PluginEnvironmentExecuteParams,
   PluginEnvironmentExecuteResult,
+  PluginSyncFileMapping,
+  PluginPostUploadCommand,
+  PluginSyncOperation,
+  PluginEnvironmentSyncInParams,
+  PluginEnvironmentSyncOutParams,
+  PluginEnvironmentSyncResult,
+  PluginEnvironmentInteractiveSetupStatus,
+  PluginEnvironmentInteractiveSetupConnectionType,
+  PluginEnvironmentTemplateRefKind,
+  PluginEnvironmentInteractiveSetupConnectionSummary,
+  PluginEnvironmentInteractiveSetupConnectionPayload,
+  PluginEnvironmentInteractiveSetupSession,
+  PluginEnvironmentStartInteractiveSetupParams,
+  PluginEnvironmentGetInteractiveSetupParams,
+  PluginEnvironmentCaptureTemplateParams,
+  PluginEnvironmentCaptureTemplateResult,
+  PluginEnvironmentCancelInteractiveSetupParams,
+  PluginEnvironmentCancelInteractiveSetupResult,
+  PluginEnvironmentDeleteTemplateParams,
+  PluginEnvironmentDeleteTemplateResult,
   PluginModalBoundsRequest,
   PluginRenderCloseEvent,
   PluginLauncherRenderContextSnapshot,
@@ -261,7 +282,12 @@ export type {
   PluginMetricsClient,
   PluginTelemetryClient,
   PluginLogger,
+  PluginTracer,
+  PluginSpan,
 } from "./types.js";
+
+// Tracer no-op default (a value, so it re-exports here, not in the type block).
+export { NOOP_PLUGIN_TRACER, NOOP_PLUGIN_SPAN } from "./types.js";
 
 // Supporting types for context clients
 export type {
@@ -290,6 +316,7 @@ export type {
   PluginDatabaseClient,
   HumanCompanyMembershipRole,
   MembershipStatus,
+  EnvSecretRefBinding,
 } from "./types.js";
 
 // Manifest and constant types re-exported from @paperclipai/shared
@@ -301,6 +328,7 @@ export type {
   PluginWebhookDeclaration,
   PluginToolDeclaration,
   PluginEnvironmentDriverDeclaration,
+  PluginEnvironmentTemplateConfigBinding,
   PluginManagedAgentDeclaration,
   PluginManagedAgentResolution,
   PluginManagedProjectDeclaration,

@@ -37,6 +37,7 @@ import {
   type ExecutionWorkspaceMode,
   type IssueExecutionWorkspaceSettings,
   type PipelineStageAutomation,
+  PIPELINE_AUTOMATION_DEFAULT_TITLE_TEMPLATE,
   PIPELINE_CASE_BODY_DOCUMENT_KEY,
   type RoutineVariable,
   type RoutineRevisionSnapshotV1,
@@ -48,6 +49,8 @@ import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { authorizationService } from "./authorization.js";
+import { visibleIssueCondition } from "./issue-visibility.js";
+import { finalizeSummarySlotsForTerminalIssue } from "./summary-slot-finalization.js";
 import {
   formatPipelineCaseOutputContextMarkdown,
   pipelineCaseOutputsService,
@@ -65,6 +68,11 @@ const PIPELINE_CASE_BODY_DOCUMENT_TITLE = "Item body document";
 export const PIPELINE_CASE_EVENTS_DEFAULT_LIMIT = 50;
 export const PIPELINE_CASE_EVENTS_MAX_LIMIT = 100;
 export const PIPELINE_CONTEXT_PACK_EVENT_LIMIT = 20;
+export { PIPELINE_AUTOMATION_DEFAULT_TITLE_TEMPLATE };
+
+function legacyPipelineAutomationTitle(stageName: string) {
+  return `${stageName} automation`;
+}
 
 const DEFAULT_STAGES = [
   { key: "intake", name: "Intake", kind: "working", position: 100 },
@@ -126,6 +134,7 @@ export type PipelineStageConfig = Record<string, unknown> & {
   automation?: {
     routineId?: string | null;
     assigneeAgentId?: string | null;
+    titleTemplate?: string | null;
     instructionsBody?: string | null;
     projectId?: string | null;
     projectWorkspaceId?: string | null;
@@ -352,7 +361,7 @@ async function getUsableConversationIssue(db: PipelineDb, companyId: string, iss
     .where(and(
       eq(issues.companyId, companyId),
       eq(issues.id, issueId),
-      isNull(issues.hiddenAt),
+      visibleIssueCondition(),
       isNull(issues.cancelledAt),
       ne(issues.status, "cancelled"),
     ))
@@ -401,7 +410,7 @@ async function resolveLatestCaseIssueLink(
       eq(pipelineCaseIssueLinks.caseId, input.caseId),
       inArray(pipelineCaseIssueLinks.role, input.roles),
       eq(issues.companyId, input.companyId),
-      isNull(issues.hiddenAt),
+      visibleIssueCondition(),
       isNull(issues.cancelledAt),
       ne(issues.status, "cancelled"),
     ))
@@ -822,13 +831,36 @@ function readStageAutomationRequest(config?: PipelineStageConfig | null) {
   const automation = config?.automation;
   if (!automation || typeof automation !== "object" || Array.isArray(automation)) return null;
   const assigneeAgentId = readOptionalTrimmedString(automation.assigneeAgentId);
+  const titleTemplate =
+    typeof automation.titleTemplate === "string" && automation.titleTemplate.trim().length > 0
+      ? automation.titleTemplate.trim()
+      : null;
   const instructionsBody =
     typeof automation.instructionsBody === "string" ? automation.instructionsBody : "";
   return {
     assigneeAgentId,
+    titleTemplate,
     instructionsBody,
     executionContext: readAutomationExecutionContext(automation),
   };
+}
+
+function resolvePipelineAutomationTitleTemplate(input: {
+  requestedTitleTemplate: string | null;
+  previousRoutine: typeof routines.$inferSelect | null;
+  stageName: string;
+  previousStageName: string;
+}) {
+  if (input.requestedTitleTemplate) return input.requestedTitleTemplate;
+  const previousTitle = input.previousRoutine?.title;
+  if (
+    previousTitle &&
+    previousTitle !== legacyPipelineAutomationTitle(input.previousStageName) &&
+    previousTitle !== legacyPipelineAutomationTitle(input.stageName)
+  ) {
+    return previousTitle;
+  }
+  return PIPELINE_AUTOMATION_DEFAULT_TITLE_TEMPLATE;
 }
 
 function persistedStageConfig(config?: PipelineStageConfig | null): PipelineStageConfig {
@@ -1103,6 +1135,7 @@ function derivedStageAutomationPayload(
   return {
     routineId: routine.id,
     assigneeAgentId: routine.assigneeAgentId,
+    titleTemplate: routine.title,
     instructionsBody: routine.description ?? "",
     ...executionContext,
     env: routine.env ?? null,
@@ -1142,10 +1175,13 @@ function routineRevisionSnapshotRoutine(routine: typeof routines.$inferSelect): 
     status: routine.status as RoutineRevisionSnapshotV1["routine"]["status"],
     concurrencyPolicy: routine.concurrencyPolicy as RoutineRevisionSnapshotV1["routine"]["concurrencyPolicy"],
     catchUpPolicy: routine.catchUpPolicy as RoutineRevisionSnapshotV1["routine"]["catchUpPolicy"],
+    activityGatePolicy: routine.activityGatePolicy as RoutineRevisionSnapshotV1["routine"]["activityGatePolicy"],
+    activityGateScope: routine.activityGateScope as RoutineRevisionSnapshotV1["routine"]["activityGateScope"],
     originKind: routine.originKind,
     originId: routine.originId,
     variables: routine.variables ?? [],
     env: routine.env ?? null,
+    responsibleUserId: routine.responsibleUserId ?? null,
   };
 }
 
@@ -1892,7 +1928,7 @@ async function postSystemCommentOnLinkedIssues(
       inArray(pipelineCaseIssueLinks.role, input.roles),
       ne(issues.status, "done"),
       ne(issues.status, "cancelled"),
-      isNull(issues.hiddenAt),
+      visibleIssueCondition(),
     ));
 
   for (const row of rows) {
@@ -1990,7 +2026,7 @@ async function notifyDependentWorkIssuesOfUpstreamContentChange(
       eq(issues.companyId, input.companyId),
       ne(issues.status, "done"),
       ne(issues.status, "cancelled"),
-      isNull(issues.hiddenAt),
+      visibleIssueCondition(),
     ));
   const issueIdsByCase = new Map<string, string[]>();
   for (const row of linkRows) {
@@ -2684,14 +2720,16 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       companyId: string;
       pipelineId: string;
       stage: typeof pipelineStages.$inferSelect;
+      previousStageName: string;
+      previousRoutineId: string | null;
       config: PipelineStageConfig;
       assigneeAgentId: string | null;
+      titleTemplate: string | null;
       instructionsBody: string;
       executionContext: PipelineAutomationExecutionContext;
       actor: PipelineActor;
     },
   ): Promise<PipelineStageConfig> {
-    const previousRoutineId = stageAutomationRoutineIdFromConfig(input.config);
     if (!input.assigneeAgentId) {
       const { onEnter: _onEnter, ...rest } = input.config;
       return rest as PipelineStageConfig;
@@ -2699,23 +2737,25 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
 
     await assertAssignableAgent(dbOrTx as Db, input.companyId, input.assigneeAgentId, { kind: "routine" });
     const actorPatch = routineActorPatch(input.actor);
-    const variables = syncRoutineVariablesWithTemplate(
-      [input.stage.name, input.instructionsBody],
-      sanitizePipelineRoutineVariables(input.config.variables),
-    );
-    const title = `${input.stage.name} automation`;
-    const description = input.instructionsBody.trim();
-
-    const previousRoutine = previousRoutineId
+    const previousRoutine = input.previousRoutineId
       ? await dbOrTx
           .select()
           .from(routines)
-          .where(and(eq(routines.id, previousRoutineId), eq(routines.companyId, input.companyId)))
+          .where(and(eq(routines.id, input.previousRoutineId), eq(routines.companyId, input.companyId)))
           .then((rows) => rows[0] ?? null)
       : null;
     const canReusePrevious =
       previousRoutine &&
       (previousRoutine.originKind === "pipeline_automation" || previousRoutine.originKind === "manual");
+    const title = resolvePipelineAutomationTitleTemplate({
+      requestedTitleTemplate: input.titleTemplate,
+      previousRoutine: canReusePrevious ? previousRoutine : null,
+      stageName: input.stage.name,
+      previousStageName: input.previousStageName,
+    });
+    const configWithVariables = reconcilePipelineStageConfigVariables(input.config, [title, input.instructionsBody]);
+    const variables = sanitizePipelineRoutineVariables(configWithVariables.variables);
+    const description = input.instructionsBody.trim();
 
     if (canReusePrevious) {
       const now = nowDate();
@@ -2742,7 +2782,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         "Updated pipeline automation",
       );
       return {
-        ...input.config,
+        ...configWithVariables,
         onEnter: {
           type: "run_routine" as const,
           routineId: revised.id,
@@ -2781,7 +2821,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       "Created pipeline automation",
     );
     return {
-      ...input.config,
+      ...configWithVariables,
       onEnter: {
         type: "run_routine" as const,
         routineId: revised.id,
@@ -3604,7 +3644,10 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       const stageName = input.patch.name ?? existing.name;
       let config = normalizeStageConfig(kind, input.patch.config !== undefined ? input.patch.config : stageConfig(existing));
       if (automationRequest) {
-        config = reconcilePipelineStageConfigVariables(config, [stageName, automationRequest.instructionsBody]);
+        config = reconcilePipelineStageConfigVariables(config, [
+          automationRequest.titleTemplate ?? PIPELINE_AUTOMATION_DEFAULT_TITLE_TEMPLATE,
+          automationRequest.instructionsBody,
+        ]);
       }
       await validateStageTargets(input.companyId, input.pipelineId, kind, config);
       await validateStageAutomationConfig(input.companyId, config);
@@ -3614,8 +3657,11 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               companyId: input.companyId,
               pipelineId: input.pipelineId,
               stage: { ...existing, name: stageName, kind },
+              previousStageName: existing.name,
+              previousRoutineId,
               config,
               assigneeAgentId: automationRequest.assigneeAgentId,
+              titleTemplate: automationRequest.titleTemplate,
               instructionsBody: automationRequest.instructionsBody,
               executionContext: automationRequest.executionContext,
               actor: input.actor ?? { type: "system" },
@@ -4567,14 +4613,27 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           ? effects.linkedAutomationIssueIds
           : [];
         if (issueIdsToCancel.length > 0) {
-          await tx
+          const cancelledIssues = await tx
             .update(issues)
             .set({ status: "cancelled", updatedAt: now })
             .where(and(
               eq(issues.companyId, input.companyId),
               inArray(issues.id, issueIdsToCancel),
               ne(issues.status, "done"),
-            ));
+            ))
+            .returning({
+              id: issues.id,
+              companyId: issues.companyId,
+              identifier: issues.identifier,
+              title: issues.title,
+              status: issues.status,
+            });
+          for (const issue of cancelledIssues) {
+            await finalizeSummarySlotsForTerminalIssue(tx, {
+              ...issue,
+              status: "cancelled",
+            });
+          }
           await tx
             .update(pipelineCaseIssueLinks)
             .set({

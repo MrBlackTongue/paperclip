@@ -3,6 +3,7 @@ import type {
   IssueCommentMetadataRowType,
   IssueCommentPresentationKind,
   IssueCommentPresentationTone,
+  IssueCommentPresentationDensity,
   IssueExecutionMonitorClearReason,
   IssueExecutionMonitorKind,
   IssueExecutionMonitorRecoveryPolicy,
@@ -13,8 +14,10 @@ import type {
   IssueReferenceSourceKind,
   IssueExecutionStageType,
   IssueExecutionStateStatus,
+  IssueHarnessKind,
   IssueOriginKind,
   IssuePriority,
+  IssueReviewPolicy,
   IssueRecoveryActionKind,
   IssueRecoveryActionOutcome,
   IssueRecoveryActionOwnerType,
@@ -23,6 +26,7 @@ import type {
   ModelProfileKey,
   IssueThreadInteractionContinuationPolicy,
   IssueThreadInteractionKind,
+  IssueThreadInteractionResolverPolicy,
   IssueThreadInteractionStatus,
   IssueStatus,
 } from "../constants.js";
@@ -146,7 +150,9 @@ export interface AcceptedPlanDecompositionChild {
   description?: string | null;
   status: IssueStatus;
   workMode: IssueWorkMode;
+  harnessKind?: IssueHarnessKind | null;
   priority: IssuePriority;
+  reviewPolicy?: IssueReviewPolicy | null;
   assigneeAgentId?: string | null;
   assigneeUserId?: string | null;
   requestDepth?: number;
@@ -212,6 +218,175 @@ export interface IssueRelationIssueSummary {
   activeRecoveryAction?: IssueRecoveryAction | null;
 }
 
+export type IssueBlockerDiagnosticFlag =
+  | "done_but_blocking"
+  | "cancelled_blocker_in_set"
+  | "workspace_finalize_pending";
+
+export interface IssueBlockerDiagnosticIssueSummary {
+  id: string;
+  identifier: string | null;
+  title: string;
+  status: IssueStatus;
+  priority: IssuePriority;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+}
+
+export interface IssueBlockerDiagnosticNode extends IssueBlockerDiagnosticIssueSummary {
+  isUnresolved: boolean;
+  isDependencyReady: boolean;
+  isPendingFinalize: boolean;
+  flags: IssueBlockerDiagnosticFlag[];
+}
+
+export interface IssueBlockerDiagnosticsReadiness {
+  allBlockersDone: boolean;
+  isDependencyReady: boolean;
+  unresolvedBlockerCount: number;
+  pendingFinalizeBlockerCount: number;
+}
+
+export interface IssueBlockerDiagnosticsResponse {
+  issue: IssueBlockerDiagnosticIssueSummary;
+  diagnosis: string | null;
+  readiness: IssueBlockerDiagnosticsReadiness | null;
+  blockers: IssueBlockerDiagnosticNode[];
+  omittedUnauthorizedBlockerCount: number | null;
+  truncated: boolean;
+  caps: {
+    maxBlockers: number;
+  };
+}
+
+export type IssueWakeDiagnosticWakeFailureClass = "failed" | "cancelled" | "skipped";
+
+export interface IssueWakeDiagnosticWakeRequest {
+  kind: "wake_request";
+  agentId: string | null;
+  source: string;
+  reason: string | null;
+  status: string;
+  coalescedCount: number;
+  runId: string | null;
+  requestedAt: string;
+  claimedAt: string | null;
+  finishedAt: string | null;
+  failureClass: IssueWakeDiagnosticWakeFailureClass | null;
+}
+
+export interface IssueWakeDiagnosticActivityRecord {
+  kind: "activity";
+  action: string;
+  entityType: string;
+  agentId: string | null;
+  runId: string | null;
+  createdAt: string;
+  source: string | null;
+  requestedReason: string | null;
+  previousReason: string | null;
+  rootIssueId: string | null;
+  holdId: string | null;
+  summary: string;
+}
+
+export type IssueWakeDiagnosticEvent =
+  | IssueWakeDiagnosticWakeRequest
+  | IssueWakeDiagnosticActivityRecord;
+
+export interface IssueWakeDiagnosticsResponse {
+  issue: IssueBlockerDiagnosticIssueSummary;
+  diagnosis: string | null;
+  likelyReason: string | null;
+  events: IssueWakeDiagnosticEvent[];
+  wakeRequestCount: number;
+  activityRecordCount: number;
+  truncated: boolean;
+  truncatedSections: {
+    wakeRequests: boolean;
+    activityRecords: boolean;
+  };
+  caps: {
+    maxWakeRequests: number;
+    maxActivityRecords: number;
+    lookbackDays: number;
+  };
+}
+
+export interface IssueSubtreeDiagnosticNode {
+  issue: IssueBlockerDiagnosticIssueSummary;
+  parentId: string | null;
+  depth: number;
+  diagnosis: string | null;
+  likelyReason: string | null;
+  blockers: IssueBlockerDiagnosticNode[];
+  blockerReadiness: IssueBlockerDiagnosticsReadiness | null;
+  omittedUnauthorizedBlockerCount: number | null;
+  wakeEvents: IssueWakeDiagnosticEvent[];
+  wakeRequestCount: number;
+  activityRecordCount: number;
+  truncated: boolean;
+  truncatedSections: {
+    blockers: boolean;
+    wakeRequests: boolean;
+    activityRecords: boolean;
+  };
+}
+
+export type IssueSubtreeDiagnosticEdge =
+  | {
+    kind: "parent";
+    fromIssueId: string;
+    toIssueId: string;
+    timestamp: string | null;
+  }
+  | {
+    kind: "blocks";
+    fromIssueId: string;
+    toIssueId: string;
+    timestamp: string | null;
+  }
+  | {
+    kind: "wake_request";
+    issueId: string;
+    agentId: string | null;
+    reason: string | null;
+    status: string;
+    timestamp: string;
+  }
+  | {
+    kind: "activity";
+    issueId: string;
+    action: string;
+    timestamp: string;
+  };
+
+export interface IssueSubtreeDiagnosticsResponse {
+  issue: IssueBlockerDiagnosticIssueSummary;
+  diagnosis: string | null;
+  likelyReason: string | null;
+  nodes: IssueSubtreeDiagnosticNode[];
+  edges: IssueSubtreeDiagnosticEdge[];
+  nodeCount: number;
+  omittedUnauthorizedNodeCount: number | null;
+  truncated: boolean;
+  truncatedSections: {
+    nodes: boolean;
+    depth: boolean;
+    blockers: boolean;
+    wakeRequests: boolean;
+    activityRecords: boolean;
+  };
+  caps: {
+    maxDepth: number;
+    maxNodes: number;
+    maxBlockersPerNode: number;
+    maxWakeRequestsPerNode: number;
+    maxActivityRecordsPerNode: number;
+    lookbackDays: number;
+  };
+}
+
 export type IssueBlockerAttentionState = "none" | "covered" | "stalled" | "needs_attention";
 
 export type IssueBlockerAttentionReason =
@@ -228,8 +403,48 @@ export interface IssueBlockerAttention {
   coveredBlockerCount: number;
   stalledBlockerCount: number;
   attentionBlockerCount: number;
+  pendingFinalizeBlockerIssueIds?: string[];
   sampleBlockerIdentifier: string | null;
   sampleStalledBlockerIdentifier: string | null;
+  /** True when a blocker or one of its open descendants is actively progressing. */
+  blockingTreeLive?: boolean;
+  /** The sampled leaf blocker that requires action, rather than the blocked root. */
+  terminalBlockerIssueId?: string | null;
+}
+
+export type IssueReviewAttentionState = "none" | "covered" | "stalled";
+
+export type IssueReviewAttentionPathKind =
+  | "execution_participant"
+  | "interaction"
+  | "approval"
+  | "monitor"
+  | "human_reviewer"
+  | "active_run"
+  | "queued_wake"
+  | "recovery";
+
+export interface IssueReviewAttentionPath {
+  kind: IssueReviewAttentionPathKind;
+  label: string;
+  responder: string | null;
+  since: string | null;
+  ref: string | null;
+}
+
+export interface IssueReviewAttention {
+  state: IssueReviewAttentionState;
+  paths: IssueReviewAttentionPath[];
+  reason: string | null;
+}
+
+export type StalledReviewDecisionAction = "approve" | "request_changes" | "send_back";
+
+export interface StalledReviewDecisionResponse {
+  issue: Issue;
+  action: StalledReviewDecisionAction;
+  comment: IssueComment | null;
+  wakeQueued: boolean;
 }
 
 export type IssueInboxAttentionKind = "blocked";
@@ -301,6 +516,13 @@ export interface IssueBlockedInboxAttention {
   };
 }
 
+export type IssueUnblockOwner = { agentId: string } | { userId: string } | "board";
+
+export interface IssueUnblockDescriptor {
+  owner: IssueUnblockOwner;
+  action: string;
+}
+
 export type IssueProductivityReviewTrigger =
   | "no_comment_streak"
   | "long_active_duration"
@@ -351,6 +573,8 @@ export type SuccessfulRunHandoffStateKind = "required" | "resolved" | "escalated
 export interface SuccessfulRunHandoffState {
   state: SuccessfulRunHandoffStateKind;
   required: boolean;
+  hasLiveContinuation: boolean;
+  liveRunId?: string | null;
   sourceRunId: string | null;
   correctiveRunId: string | null;
   assigneeAgentId: string | null;
@@ -449,6 +673,12 @@ export interface IssueExecutionPolicy {
   monitor?: IssueExecutionMonitorPolicy | null;
   reviewPreset?: LowTrustReviewPresetPolicy;
   authorizationPolicy?: TrustAuthorizationPolicy;
+  /**
+   * Maximum consecutive agent-initiated changes-requested rounds before the
+   * pending stage escalates to the responsible human. Null uses the server
+   * default. Human decisions reset the round counter.
+   */
+  maxReviewRounds?: number | null;
 }
 
 export interface IssueExecutionMonitorState {
@@ -484,6 +714,8 @@ export interface IssueExecutionState {
   lastDecisionId: string | null;
   lastDecisionOutcome: IssueExecutionDecisionOutcome | null;
   monitor?: IssueExecutionMonitorState | null;
+  /** Consecutive agent-initiated changes-requested rounds on the current stage. */
+  changesRequestedCount?: number;
 }
 
 export interface IssueExecutionDecision {
@@ -529,6 +761,14 @@ export interface IssueWatchdog extends IssueWatchdogSummary {
   updatedByRunId: string | null;
 }
 
+export interface IssueChangeReceiptEntry {
+  from: unknown;
+  to: unknown;
+  updated?: true;
+}
+
+export type IssueChanges = Record<string, IssueChangeReceiptEntry>;
+
 export interface Issue {
   id: string;
   companyId: string;
@@ -542,6 +782,7 @@ export interface Issue {
   status: IssueStatus;
   workMode: IssueWorkMode;
   priority: IssuePriority;
+  reviewPolicy: IssueReviewPolicy | null;
   assigneeAgentId: string | null;
   assigneeUserId: string | null;
   checkoutRunId: string | null;
@@ -550,6 +791,7 @@ export interface Issue {
   executionLockedAt: Date | null;
   createdByAgentId: string | null;
   createdByUserId: string | null;
+  responsibleUserId: string | null;
   issueNumber: number | null;
   identifier: string | null;
   originKind?: IssueOriginKind;
@@ -579,12 +821,17 @@ export interface Issue {
   blockedBy?: IssueRelationIssueSummary[];
   blocks?: IssueRelationIssueSummary[];
   blockerAttention?: IssueBlockerAttention;
+  reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
+  unblockDescriptor?: IssueUnblockDescriptor | null;
+  blockedTransitionAt?: Date | null;
+  blockedOwnerNotifiedAt?: Date | null;
   productivityReview?: IssueProductivityReview | null;
   activeRecoveryAction?: IssueRecoveryAction | null;
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
   watchdog?: IssueWatchdogSummary | null;
   scheduledRetry?: IssueScheduledRetry | null;
+  liveDescendantCount?: number;
   relatedWork?: IssueRelatedWorkSummary;
   referencedIssueIdentifiers?: string[];
   planDocument?: IssueDocument | null;
@@ -599,9 +846,86 @@ export interface Issue {
   lastExternalCommentAt?: Date | null;
   lastActivityAt?: Date | null;
   isUnreadForMe?: boolean;
+  archivedAt?: Date | null;
+  archivedByActorType?: "user" | "agent" | null;
+  archivedByAgentId?: string | null;
+  archivedByRunId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type CompactIssue = Pick<
+  Issue,
+  | "id"
+  | "companyId"
+  | "projectId"
+  | "projectWorkspaceId"
+  | "goalId"
+  | "parentId"
+  | "title"
+  | "description"
+  | "status"
+  | "workMode"
+  | "priority"
+  | "reviewPolicy"
+  | "assigneeAgentId"
+  | "assigneeUserId"
+  | "checkoutRunId"
+  | "executionRunId"
+  | "executionAgentNameKey"
+  | "executionLockedAt"
+  | "createdByAgentId"
+  | "createdByUserId"
+  | "issueNumber"
+  | "identifier"
+  | "originKind"
+  | "originId"
+  | "originRunId"
+  | "requestDepth"
+  | "billingCode"
+  | "executionWorkspaceId"
+  | "startedAt"
+  | "completedAt"
+  | "cancelledAt"
+  | "createdAt"
+  | "updatedAt"
+> & {
+  labelIds?: string[];
+  labels?: IssueLabel[];
+  blockedBy?: IssueRelationIssueSummary[];
+  blockerAttention?: IssueBlockerAttention;
+  reviewAttention?: IssueReviewAttention;
+  blockedInboxAttention?: IssueBlockedInboxAttention | null;
+  productivityReview?: IssueProductivityReview | null;
+  scheduledRetry?: IssueScheduledRetry | null;
+  liveDescendantCount?: number;
+  myLastTouchAt?: Date | null;
+  lastExternalCommentAt?: Date | null;
+  lastActivityAt?: Date | null;
+  isUnreadForMe?: boolean;
+  archivedAt?: Date | null;
+  archivedByActorType?: "user" | "agent" | null;
+  archivedByAgentId?: string | null;
+  archivedByRunId?: string | null;
+  activeRecoveryAction: IssueRecoveryAction | null;
+  successfulRunHandoff: SuccessfulRunHandoffState | null;
+};
+
+/**
+ * Where a comment's derived (non-stored-author) agent attribution came from,
+ * in descending confidence:
+ * - `run_id`: comment carries a `createdByRunId`/`derivedCreatedByRunId` whose
+ *   run resolves directly to an agent (lossless).
+ * - `run_log_comment_post`: a run log within the comment window contains the
+ *   `comment id: {id}` post marker (lossless: the run recorded posting it).
+ *
+ * Only lossless signals are used. Pure run-window timing overlap is NOT a
+ * source — it cannot distinguish an agent comment from a human board comment
+ * that coincided with a run (Option A).
+ */
+export type IssueCommentDerivedAuthorSource =
+  | "run_id"
+  | "run_log_comment_post";
 
 export interface IssueComment {
   id: string;
@@ -610,10 +934,12 @@ export interface IssueComment {
   authorType: IssueCommentAuthorType;
   authorAgentId: string | null;
   authorUserId: string | null;
+  /** Responsible user attribution. Legacy and plugin-provided comment values may omit it. */
+  onBehalfOfUserId?: string | null;
   createdByRunId?: string | null;
   derivedAuthorAgentId?: string | null;
   derivedCreatedByRunId?: string | null;
-  derivedAuthorSource?: "run_log_comment_post" | null;
+  derivedAuthorSource?: IssueCommentDerivedAuthorSource | null;
   body: string;
   presentation: IssueCommentPresentation | null;
   metadata: IssueCommentMetadata | null;
@@ -666,6 +992,7 @@ export interface IssueCommentMetadataAgentLinkRow extends IssueCommentMetadataRo
 export interface IssueCommentMetadataRunLinkRow extends IssueCommentMetadataRowBase {
   type: "run_link";
   runId: string;
+  agentId?: string | null;
   title?: string | null;
 }
 
@@ -685,6 +1012,7 @@ export interface IssueCommentMetadataSection {
 export interface IssueCommentMetadata {
   version: 1;
   sourceRunId?: string | null;
+  authorizationReason?: string | null;
   sections: IssueCommentMetadataSection[];
 }
 
@@ -693,12 +1021,14 @@ export interface IssueCommentPresentation {
   tone: IssueCommentPresentationTone;
   title?: string | null;
   detailsDefaultOpen: boolean;
+  density?: IssueCommentPresentationDensity;
 }
 
 export interface IssueThreadInteractionActorFields {
   createdByAgentId?: string | null;
   createdByUserId?: string | null;
   resolvedByAgentId?: string | null;
+  resolvedByRunId?: string | null;
   resolvedByUserId?: string | null;
 }
 
@@ -736,6 +1066,8 @@ export interface SuggestTasksResultCreatedTask {
 
 export interface SuggestTasksResult {
   version: 1;
+  outcome?: "withdrawn" | "issue_closed" | "addressee_deleted";
+  reason?: string | null;
   createdTasks?: SuggestTasksResultCreatedTask[];
   skippedClientKeys?: string[];
   rejectionReason?: string | null;
@@ -760,6 +1092,7 @@ export interface AskUserQuestionsPayload {
   version: 1;
   title?: string | null;
   submitLabel?: string | null;
+  supersedeOnUserComment?: boolean;
   questions: AskUserQuestionsQuestion[];
 }
 
@@ -771,9 +1104,13 @@ export interface AskUserQuestionsAnswer {
 
 export interface AskUserQuestionsResult {
   version: 1;
+  outcome?: "withdrawn" | "issue_closed" | "addressee_deleted";
+  reason?: string | null;
   answers: AskUserQuestionsAnswer[];
   cancelled?: true;
   cancellationReason?: string | null;
+  expirationReason?: "superseded_by_comment";
+  commentId?: string | null;
   summaryMarkdown?: string | null;
 }
 
@@ -801,6 +1138,43 @@ export type RequestConfirmationTarget =
   | RequestConfirmationIssueDocumentTarget
   | RequestConfirmationCustomTarget;
 
+/**
+ * Enrichment block carried on a `request_confirmation` interaction when it gates
+ * a write/destructive MCP tool call (PAP-13726 §D1). Its presence flips the feed
+ * card into the dedicated tool-approval rendering (PAP-13745). Arguments are
+ * redacted server-side before this reaches the client.
+ */
+export interface RequestConfirmationToolActionPayload {
+  version: 1;
+  actionRequestId: string;
+  invocationId: string;
+  toolName: string;
+  toolDisplayName: string;
+  connectionId: string | null;
+  applicationId: string | null;
+  appDisplayName: string | null;
+  risk: "write" | "destructive";
+  previewMarkdown: string;
+  argumentsSummaryJson: string;
+  argumentsHash: string;
+  expiresAt: string;
+}
+
+/**
+ * Lifecycle status written back onto the resolved interaction once the operator
+ * approves. `approve = run`, so the terminal states are executed/failed/expired —
+ * never a bare "accepted".
+ */
+export interface RequestConfirmationToolActionResult {
+  version: 1;
+  status: "approved" | "executing" | "executed" | "failed" | "expired";
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  resultSummary?: string | null;
+  resultHref?: string | null;
+  updatedAt: string;
+}
+
 export interface RequestConfirmationPayload {
   version: 1;
   prompt: string;
@@ -813,6 +1187,7 @@ export interface RequestConfirmationPayload {
   detailsMarkdown?: string | null;
   supersedeOnUserComment?: boolean;
   target?: RequestConfirmationTarget | null;
+  toolAction?: RequestConfirmationToolActionPayload;
 }
 
 export interface RequestCheckboxConfirmationOption {
@@ -839,16 +1214,79 @@ export interface RequestCheckboxConfirmationPayload {
   target?: RequestConfirmationTarget | null;
 }
 
+export type RequestItemVerdictValue = "approve" | "reject" | "defer";
+
+export interface RequestItemVerdictsItem {
+  id: string;
+  label: string;
+  description?: string | null;
+  previewMarkdown?: string | null;
+  href?: string | null;
+  attachmentId?: string | null;
+}
+
+export interface RequestItemVerdictsPayload {
+  version: 1;
+  prompt: string;
+  detailsMarkdown?: string | null;
+  items: RequestItemVerdictsItem[];
+  verdicts?: RequestItemVerdictValue[];
+  requireReasonOn?: RequestItemVerdictValue[];
+  reasonLabel?: string | null;
+  allowBulkApprove?: boolean;
+  supersedeOnUserComment?: boolean;
+  target?: RequestConfirmationTarget | null;
+}
+
 export interface RequestConfirmationResult {
   version: 1;
-  outcome: "accepted" | "rejected" | "superseded_by_comment" | "stale_target";
+  outcome:
+    | "accepted"
+    | "rejected"
+    | "superseded_by_comment"
+    | "superseded_by_newer_request"
+    | "stale_target"
+    | "withdrawn"
+    | "issue_closed"
+    | "addressee_deleted";
   reason?: string | null;
   commentId?: string | null;
+  supersededByInteractionId?: string | null;
   staleTarget?: RequestConfirmationTarget | null;
+  resumeFailure?: {
+    status: "retrying" | "needs_attention";
+    errorCode: string | null;
+    attempt: number;
+    maxAttempts: number;
+    runId?: string | null;
+    retryRunId?: string | null;
+    recoveryActionId?: string | null;
+    updatedAt?: string | null;
+  } | null;
+  toolAction?: RequestConfirmationToolActionResult;
 }
 
 export interface RequestCheckboxConfirmationResult extends RequestConfirmationResult {
   selectedOptionIds?: string[];
+}
+
+export interface RequestItemVerdictsResultItem {
+  id: string;
+  verdict: RequestItemVerdictValue;
+  reason?: string | null;
+  resolvedByUserId: string;
+  resolvedAt: Date | string;
+  commentId?: string | null;
+}
+
+export interface RequestItemVerdictsResult {
+  version: 1;
+  outcome: "resolved" | "superseded_by_comment" | "stale_target" | "cancelled" | "withdrawn" | "issue_closed" | "addressee_deleted";
+  reason?: string | null;
+  complete: boolean;
+  items: RequestItemVerdictsResultItem[];
+  commentId?: string | null;
+  staleTarget?: RequestConfirmationTarget | null;
 }
 
 export interface IssueThreadInteractionBase extends IssueThreadInteractionActorFields {
@@ -859,10 +1297,14 @@ export interface IssueThreadInteractionBase extends IssueThreadInteractionActorF
   idempotencyKey?: string | null;
   sourceCommentId?: string | null;
   sourceRunId?: string | null;
+  addresseeAgentId?: string | null;
   title?: string | null;
   summary?: string | null;
   status: IssueThreadInteractionStatus;
   continuationPolicy: IssueThreadInteractionContinuationPolicy;
+  resolverPolicy: IssueThreadInteractionResolverPolicy;
+  requestedResolverPolicy: IssueThreadInteractionResolverPolicy;
+  effectiveResolverPolicy: IssueThreadInteractionResolverPolicy;
   createdAt: Date | string;
   updatedAt: Date | string;
   resolvedAt?: Date | string | null;
@@ -892,23 +1334,32 @@ export interface RequestCheckboxConfirmationInteraction extends IssueThreadInter
   result?: RequestCheckboxConfirmationResult | null;
 }
 
+export interface RequestItemVerdictsInteraction extends IssueThreadInteractionBase {
+  kind: "request_item_verdicts";
+  payload: RequestItemVerdictsPayload;
+  result?: RequestItemVerdictsResult | null;
+}
+
 export type IssueThreadInteraction =
   | SuggestTasksInteraction
   | AskUserQuestionsInteraction
   | RequestConfirmationInteraction
-  | RequestCheckboxConfirmationInteraction;
+  | RequestCheckboxConfirmationInteraction
+  | RequestItemVerdictsInteraction;
 
 export type IssueThreadInteractionPayload =
   | SuggestTasksPayload
   | AskUserQuestionsPayload
   | RequestConfirmationPayload
-  | RequestCheckboxConfirmationPayload;
+  | RequestCheckboxConfirmationPayload
+  | RequestItemVerdictsPayload;
 
 export type IssueThreadInteractionResult =
   | SuggestTasksResult
   | AskUserQuestionsResult
   | RequestConfirmationResult
-  | RequestCheckboxConfirmationResult;
+  | RequestCheckboxConfirmationResult
+  | RequestItemVerdictsResult;
 
 export interface IssueAttachment {
   id: string;

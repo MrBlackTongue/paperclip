@@ -22,6 +22,19 @@ const mockEnvironmentService = vi.hoisted(() => ({
   create: vi.fn(),
 }));
 
+const mockEnvironmentCustomImageService = vi.hoisted(() => ({
+  getOverview: vi.fn(),
+  getActiveTemplate: vi.fn(),
+  getSessionById: vi.fn(),
+  startSetupSession: vi.fn(),
+  refreshSetupSession: vi.fn(),
+  finishSetupSession: vi.fn(),
+  cancelSetupSession: vi.fn(),
+  rollbackTemplate: vi.fn(),
+  disableTemplate: vi.fn(),
+  cleanupExpiredSetupSessions: vi.fn(),
+}));
+
 const mockExecutionWorkspaceService = vi.hoisted(() => ({
   clearEnvironmentSelection: vi.fn(),
 }));
@@ -35,11 +48,13 @@ const mockSecretService = vi.hoisted(() => ({
   resolveSecretValueForEphemeralAccess: vi.fn(),
   syncEnvBindingsForTarget: vi.fn(),
   syncSecretRefsForTarget: vi.fn(),
+  replaceSecretRefsForInstanceTarget: vi.fn(),
 }));
 
 vi.mock("../services/index.js", () => ({
   issueService: () => mockIssueService,
   instanceSettingsService: () => mockInstanceSettingsService,
+  environmentCustomImageService: () => mockEnvironmentCustomImageService,
   logActivity: mockLogActivity,
   projectService: () => mockProjectService,
 }));
@@ -58,6 +73,24 @@ vi.mock("../services/secrets.js", () => ({
 
 vi.mock("../services/plugin-environment-driver.js", () => ({
   listReadyPluginEnvironmentDrivers: vi.fn(async () => []),
+  resolvePluginSandboxProviderDriverByKey: vi.fn(async () => null),
+  validatePluginEnvironmentDriverConfig: vi.fn(async ({ config }) => config),
+  validatePluginSandboxProviderConfig: vi.fn(async ({ provider, config }) => ({
+    normalizedConfig: config,
+    pluginId: `plugin-${provider}`,
+    pluginKey: `plugin.${provider}`,
+    driver: {
+      driverKey: provider,
+      kind: "sandbox_provider",
+      displayName: provider,
+      configSchema: { type: "object" },
+    },
+  })),
+  startPluginEnvironmentInteractiveSetup: vi.fn(),
+  getPluginEnvironmentInteractiveSetup: vi.fn(),
+  capturePluginEnvironmentTemplate: vi.fn(),
+  cancelPluginEnvironmentInteractiveSetup: vi.fn(),
+  deletePluginEnvironmentTemplate: vi.fn(),
 }));
 
 function createEnvironment(overrides: Record<string, unknown> = {}) {
@@ -84,7 +117,9 @@ function createApp(actor: Record<string, unknown>) {
     (req as typeof req & { actor: Record<string, unknown> }).actor = actor;
     next();
   });
-  app.use("/api", environmentRoutes({} as never));
+  app.use("/api", environmentRoutes({
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({}),
+  } as never));
   app.use(errorHandler);
   return app;
 }
@@ -97,6 +132,14 @@ describe("environment instance routes", () => {
     mockEnvironmentService.list.mockReset();
     mockEnvironmentService.getById.mockReset();
     mockEnvironmentService.create.mockReset();
+    Object.values(mockEnvironmentCustomImageService).forEach((mock) => mock.mockReset());
+    mockEnvironmentCustomImageService.getOverview.mockResolvedValue({
+      activeTemplate: null,
+      activeSession: null,
+      latestSession: null,
+    });
+    mockEnvironmentCustomImageService.getActiveTemplate.mockResolvedValue(null);
+    mockEnvironmentCustomImageService.getSessionById.mockResolvedValue(null);
     mockExecutionWorkspaceService.clearEnvironmentSelection.mockReset();
     mockLogActivity.mockReset();
     mockSecretService.create.mockReset();
@@ -105,6 +148,8 @@ describe("environment instance routes", () => {
     mockSecretService.resolveSecretValueForEphemeralAccess.mockReset();
     mockSecretService.syncEnvBindingsForTarget.mockReset();
     mockSecretService.syncSecretRefsForTarget.mockReset();
+    mockSecretService.replaceSecretRefsForInstanceTarget.mockReset();
+    mockSecretService.replaceSecretRefsForInstanceTarget.mockResolvedValue([]);
 
     mockInstanceSettingsService.listCompanyIds.mockResolvedValue(["company-1", "company-2"]);
     mockEnvironmentService.list.mockResolvedValue([]);
@@ -212,16 +257,19 @@ describe("environment instance routes", () => {
         driver: "local",
         status: "active",
       }),
+      undefined,
+      { db: expect.anything() },
     );
-    expect(mockSecretService.syncSecretRefsForTarget).toHaveBeenCalledWith(
-      "company-1",
+    expect(mockSecretService.replaceSecretRefsForInstanceTarget).toHaveBeenCalledWith(
       { targetType: "environment", targetId: "env-1" },
       [],
+      { db: expect.anything() },
     );
     expect(mockSecretService.syncEnvBindingsForTarget).toHaveBeenCalledWith(
       "company-1",
       { targetType: "environment", targetId: "env-1" },
       {},
+      { db: expect.anything() },
     );
     expect(mockLogActivity).toHaveBeenCalledTimes(2);
     expect(mockLogActivity.mock.calls.map((call) => call[1].companyId)).toEqual(["company-1", "company-2"]);
@@ -255,11 +303,16 @@ describe("environment instance routes", () => {
       envVars,
       expect.objectContaining({ fieldPath: "envVars" }),
     );
-    expect(mockEnvironmentService.create).toHaveBeenCalledWith(expect.objectContaining({ envVars }));
+    expect(mockEnvironmentService.create).toHaveBeenCalledWith(
+      expect.objectContaining({ envVars }),
+      undefined,
+      { db: expect.anything() },
+    );
     expect(mockSecretService.syncEnvBindingsForTarget).toHaveBeenCalledWith(
       "company-1",
       { targetType: "environment", targetId: "env-1" },
       envVars,
+      { db: expect.anything() },
     );
   });
 
