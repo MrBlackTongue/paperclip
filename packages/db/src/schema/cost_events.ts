@@ -20,6 +20,7 @@ export const costEvents = pgTable(
     provider: text("provider").notNull(),
     biller: text("biller").notNull().default("unknown"),
     billingType: text("billing_type").notNull().default("unknown"),
+    costStatus: text("cost_status").notNull().default("reported"),
     model: text("model").notNull(),
     inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
     cachedInputTokens: bigint("cached_input_tokens", { mode: "number" }).notNull().default(0),
