@@ -7,6 +7,8 @@ import type {
   PluginIssueOriginKind,
   PluginManagedAgentResolution,
   PluginManagedRoutineResolution,
+  PluginManagedSkillResolution,
+  CompanySkill,
   Company,
   Project,
   Routine,
@@ -15,9 +17,11 @@ import type {
   IssueComment,
   IssueThreadInteraction,
   CreateIssueThreadInteraction,
+  IssueAttachment,
   IssueDocument,
   Agent,
   Goal,
+  Approval,
 } from "@paperclipai/shared";
 import type {
   EventFilter,
@@ -31,9 +35,17 @@ import type {
   ToolResult,
   ToolRunContext,
   PluginWorkspace,
+  PluginExecutionWorkspaceMetadata,
   AgentSession,
   AgentSessionEvent,
+  PluginLocalFolderEntry,
+  PluginLocalFolderStatus,
+  PluginAccessMember,
+  PrincipalPermissionGrant,
+  PermissionKey,
+  PrincipalType,
 } from "./types.js";
+import { NOOP_PLUGIN_TRACER } from "./types.js";
 import type {
   PluginEnvironmentValidateConfigParams,
   PluginEnvironmentValidationResult,
@@ -48,6 +60,17 @@ import type {
   PluginEnvironmentRealizeWorkspaceResult,
   PluginEnvironmentExecuteParams,
   PluginEnvironmentExecuteResult,
+  PluginEnvironmentStartInteractiveSetupParams,
+  PluginEnvironmentInteractiveSetupSession,
+  PluginEnvironmentGetInteractiveSetupParams,
+  PluginEnvironmentCaptureTemplateParams,
+  PluginEnvironmentCaptureTemplateResult,
+  PluginEnvironmentCancelInteractiveSetupParams,
+  PluginEnvironmentCancelInteractiveSetupResult,
+  PluginEnvironmentDeleteTemplateParams,
+  PluginEnvironmentDeleteTemplateResult,
+  PluginPerformActionActorContext,
+  PluginPerformActionContext,
 } from "./protocol.js";
 
 export interface TestHarnessOptions {
@@ -55,7 +78,7 @@ export interface TestHarnessOptions {
   manifest: PaperclipPluginManifestV1;
   /** Optional capability override. Defaults to `manifest.capabilities`. */
   capabilities?: PluginCapability[];
-  /** Initial config returned by `ctx.config.get()`. */
+  /** Initial config returned by `ctx.config.get(companyId)`. */
   config?: Record<string, unknown>;
 }
 
@@ -65,17 +88,38 @@ export interface TestHarnessLogEntry {
   meta?: Record<string, unknown>;
 }
 
+export interface TestHarnessPerformActionOptions {
+  /**
+   * Authenticated actor context to expose to the action handler. Omitted fields
+   * default to null, and `type` defaults to `system`.
+   */
+  actor?: Partial<PluginPerformActionActorContext> | null;
+  /**
+   * Host-authorized company scope. When provided, this is injected into
+   * `params.companyId` so tests match the production bridge's anti-spoofing
+   * behavior.
+   */
+  companyId?: string | null;
+}
+
 export interface TestHarness {
   /** Fully-typed in-memory plugin context passed to `plugin.setup(ctx)`. */
   ctx: PluginContext;
-  /** Seed host entities for `ctx.companies/projects/issues/agents/goals` reads. */
+  /** Seed host entities for `ctx.companies/projects/issues/agents/goals/access/authorization` reads. */
   seed(input: {
     companies?: Company[];
     projects?: Project[];
     issues?: Issue[];
     issueComments?: IssueComment[];
+    issueInteractions?: IssueThreadInteraction[];
+    issueAttachments?: Array<IssueAttachment & { contentBase64?: string }>;
+    approvals?: Approval[];
     agents?: Agent[];
     goals?: Goal[];
+    projectWorkspaces?: PluginWorkspace[];
+    executionWorkspaces?: PluginExecutionWorkspaceMetadata[];
+    accessMembers?: PluginAccessMember[];
+    principalGrants?: PrincipalPermissionGrant[];
   }): void;
   setConfig(config: Record<string, unknown>): void;
   /** Dispatch a host or plugin event to registered handlers. */
@@ -85,7 +129,11 @@ export interface TestHarness {
   /** Invoke a `ctx.data.register(...)` handler by key. */
   getData<T = unknown>(key: string, params?: Record<string, unknown>): Promise<T>;
   /** Invoke a `ctx.actions.register(...)` handler by key. */
-  performAction<T = unknown>(key: string, params?: Record<string, unknown>): Promise<T>;
+  performAction<T = unknown>(
+    key: string,
+    params?: Record<string, unknown>,
+    options?: TestHarnessPerformActionOptions,
+  ): Promise<T>;
   /** Execute a registered tool handler via `ctx.tools.execute(...)`. */
   executeTool<T = ToolResult>(name: string, params: unknown, runCtx?: Partial<ToolRunContext>): Promise<T>;
   /** Read raw in-memory state for assertions. */
@@ -114,7 +162,12 @@ export interface EnvironmentEventRecord {
     | "releaseLease"
     | "destroyLease"
     | "realizeWorkspace"
-    | "execute";
+    | "execute"
+    | "startInteractiveSetup"
+    | "getInteractiveSetup"
+    | "captureTemplate"
+    | "cancelInteractiveSetup"
+    | "deleteTemplate";
   driverKey: string;
   environmentId: string;
   timestamp: string;
@@ -136,6 +189,11 @@ export interface EnvironmentTestHarnessOptions extends TestHarnessOptions {
     onDestroyLease?: (params: PluginEnvironmentDestroyLeaseParams) => Promise<void>;
     onRealizeWorkspace?: (params: PluginEnvironmentRealizeWorkspaceParams) => Promise<PluginEnvironmentRealizeWorkspaceResult>;
     onExecute?: (params: PluginEnvironmentExecuteParams) => Promise<PluginEnvironmentExecuteResult>;
+    onStartInteractiveSetup?: (params: PluginEnvironmentStartInteractiveSetupParams) => Promise<PluginEnvironmentInteractiveSetupSession>;
+    onGetInteractiveSetup?: (params: PluginEnvironmentGetInteractiveSetupParams) => Promise<PluginEnvironmentInteractiveSetupSession>;
+    onCaptureTemplate?: (params: PluginEnvironmentCaptureTemplateParams) => Promise<PluginEnvironmentCaptureTemplateResult>;
+    onCancelInteractiveSetup?: (params: PluginEnvironmentCancelInteractiveSetupParams) => Promise<PluginEnvironmentCancelInteractiveSetupResult>;
+    onDeleteTemplate?: (params: PluginEnvironmentDeleteTemplateParams) => Promise<PluginEnvironmentDeleteTemplateResult>;
   };
 }
 
@@ -159,6 +217,16 @@ export interface EnvironmentTestHarness extends TestHarness {
   realizeWorkspace(params: PluginEnvironmentRealizeWorkspaceParams): Promise<PluginEnvironmentRealizeWorkspaceResult>;
   /** Invoke the environment driver's execute hook. */
   execute(params: PluginEnvironmentExecuteParams): Promise<PluginEnvironmentExecuteResult>;
+  /** Invoke the environment driver's interactive setup start hook. */
+  startInteractiveSetup(params: PluginEnvironmentStartInteractiveSetupParams): Promise<PluginEnvironmentInteractiveSetupSession>;
+  /** Invoke the environment driver's interactive setup status hook. */
+  getInteractiveSetup(params: PluginEnvironmentGetInteractiveSetupParams): Promise<PluginEnvironmentInteractiveSetupSession>;
+  /** Invoke the environment driver's template capture hook. */
+  captureTemplate(params: PluginEnvironmentCaptureTemplateParams): Promise<PluginEnvironmentCaptureTemplateResult>;
+  /** Invoke the environment driver's interactive setup cancel hook. */
+  cancelInteractiveSetup(params: PluginEnvironmentCancelInteractiveSetupParams): Promise<PluginEnvironmentCancelInteractiveSetupResult>;
+  /** Invoke the environment driver's optional template delete hook. */
+  deleteTemplate(params: PluginEnvironmentDeleteTemplateParams): Promise<PluginEnvironmentDeleteTemplateResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,10 +498,74 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const blockedByIssueIds = new Map<string, string[]>();
   const issueComments = new Map<string, IssueComment[]>();
   const issueInteractions = new Map<string, IssueThreadInteraction[]>();
+  const issueAttachments = new Map<string, IssueAttachment[]>();
+  const attachmentContentById = new Map<string, string>();
+  const approvals = new Map<string, Approval>();
   const issueDocuments = new Map<string, IssueDocument>();
   const agents = new Map<string, Agent>();
   const goals = new Map<string, Goal>();
+  const accessMembers = new Map<string, PluginAccessMember>();
+  const principalGrants = new Map<string, PrincipalPermissionGrant[]>();
+
+  function principalGrantsKey(companyId: string, principalType: PrincipalType, principalId: string) {
+    return `${companyId}:${principalType}:${principalId}`;
+  }
+  function getPrincipalGrants(companyId: string, principalType: PrincipalType, principalId: string) {
+    return principalGrants.get(principalGrantsKey(companyId, principalType, principalId)) ?? [];
+  }
+  function setPrincipalGrants(
+    companyId: string,
+    principalType: PrincipalType,
+    principalId: string,
+    grants: Array<{ permissionKey: PermissionKey; scope?: Record<string, unknown> | null }>,
+  ) {
+    const stamped = grants.map((grant) => ({
+      principalType,
+      principalId,
+      permissionKey: grant.permissionKey,
+      scope: grant.scope && typeof grant.scope === "object" ? grant.scope : null,
+    })) as PrincipalPermissionGrant[];
+    principalGrants.set(principalGrantsKey(companyId, principalType, principalId), stamped);
+    const member = [...accessMembers.values()].find(
+      (entry) =>
+        entry.companyId === companyId
+        && entry.principalType === principalType
+        && entry.principalId === principalId,
+    );
+    if (member) {
+      accessMembers.set(member.id, { ...member, grants: stamped, updatedAt: new Date().toISOString() });
+    }
+    return stamped;
+  }
+
+  /**
+   * Mirror the host's `requireActiveHumanMember` write bar so the harness
+   * rejects the same forged/over-privileged attributions production does: the
+   * actor must be an active `user` member of the company whose `membershipRole`
+   * is not the read-only `viewer` role (the web app 403s viewers on these same
+   * board write-routes). Keeps the harness a faithful mirror so a plugin test
+   * cannot pass an attribution production would reject. Seed members via
+   * `createTestPluginHost({ accessMembers: [...] })`.
+   */
+  function assertActiveHumanMemberCanWrite(companyId: string, actorUserId: string) {
+    const member = [...accessMembers.values()].find(
+      (entry) =>
+        entry.companyId === companyId
+        && entry.principalType === "user"
+        && entry.principalId === actorUserId
+        && entry.status === "active",
+    );
+    if (!member) {
+      throw new Error(`actorUserId "${actorUserId}" is not an active human member of this company`);
+    }
+    if (member.membershipRole === "viewer") {
+      throw new Error(`actorUserId "${actorUserId}" has viewer (read-only) access and cannot take this write action`);
+    }
+  }
   const projectWorkspaces = new Map<string, PluginWorkspace[]>();
+  const executionWorkspaces = new Map<string, PluginExecutionWorkspaceMetadata>();
+  const localFolderStatuses = new Map<string, PluginLocalFolderStatus>();
+  const localFolderFiles = new Map<string, string>();
 
   const sessions = new Map<string, AgentSession>();
   const sessionEventCallbacks = new Map<string, (event: AgentSessionEvent) => void>();
@@ -442,8 +574,83 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const jobs = new Map<string, (job: PluginJobContext) => Promise<void>>();
   const launchers = new Map<string, PluginLauncherRegistration>();
   const dataHandlers = new Map<string, (params: Record<string, unknown>) => Promise<unknown>>();
-  const actionHandlers = new Map<string, (params: Record<string, unknown>) => Promise<unknown>>();
+  const actionHandlers = new Map<
+    string,
+    (params: Record<string, unknown>, context: PluginPerformActionContext) => Promise<unknown>
+  >();
   const toolHandlers = new Map<string, (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>>();
+
+  function localFolderKey(companyId: string, folderKey: string): string {
+    return `${companyId}:${folderKey}`;
+  }
+
+  function localFolderFileKey(companyId: string, folderKey: string, relativePath: string): string {
+    return `${localFolderKey(companyId, folderKey)}:${relativePath}`;
+  }
+
+  function stringOrNull(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function actorTypeOrSystem(value: unknown): PluginPerformActionActorContext["type"] {
+    return value === "user" || value === "agent" || value === "system" ? value : "system";
+  }
+
+  function actionContextFor(
+    params: Record<string, unknown>,
+    options?: TestHarnessPerformActionOptions,
+  ): PluginPerformActionContext {
+    const actorInput = options?.actor ?? null;
+    const companyId = stringOrNull(options?.companyId) ?? stringOrNull(actorInput?.companyId) ?? stringOrNull(params.companyId);
+    const actor = Object.freeze({
+      type: actorTypeOrSystem(actorInput?.type),
+      userId: stringOrNull(actorInput?.userId),
+      agentId: stringOrNull(actorInput?.agentId),
+      runId: stringOrNull(actorInput?.runId),
+      companyId,
+    });
+    return Object.freeze({ actor, companyId });
+  }
+
+  function paramsWithHostCompanyScope(
+    params: Record<string, unknown>,
+    context: PluginPerformActionContext,
+    options?: TestHarnessPerformActionOptions,
+  ): Record<string, unknown> {
+    if (Object.prototype.hasOwnProperty.call(options ?? {}, "companyId")) {
+      return context.companyId ? { ...params, companyId: context.companyId } : { ...params };
+    }
+    return params;
+  }
+
+  function normalizeLocalFolderRelativePath(relativePath: string): string {
+    const parts: string[] = [];
+    for (const segment of relativePath.split(/[\\/]+/)) {
+      if (!segment || segment === ".") continue;
+      if (segment === "..") throw new Error("Local folder path traversal is not allowed");
+      parts.push(segment);
+    }
+    return parts.join("/");
+  }
+
+  function notConfiguredLocalFolderStatus(folderKey: string): PluginLocalFolderStatus {
+    return {
+      folderKey,
+      configured: false,
+      path: null,
+      realPath: null,
+      access: "readWrite",
+      readable: false,
+      writable: false,
+      requiredDirectories: [],
+      requiredFiles: [],
+      missingDirectories: [],
+      missingFiles: [],
+      healthy: false,
+      problems: [{ code: "not_configured", message: "No local folder path is configured." }],
+      checkedAt: new Date().toISOString(),
+    };
+  }
 
   function issueRelationSummary(issueId: string) {
     const issue = issues.get(issueId);
@@ -541,7 +748,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
       async configure(input) {
         requireCapability(manifest, capabilitySet, "local.folders");
-        return {
+        const status = {
           folderKey: input.folderKey,
           configured: true,
           path: input.path,
@@ -556,58 +763,98 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           healthy: true,
           problems: [],
           checkedAt: new Date().toISOString(),
-        };
+        } satisfies PluginLocalFolderStatus;
+        localFolderStatuses.set(localFolderKey(input.companyId, input.folderKey), status);
+        return status;
       },
-      async status(_companyId, folderKey) {
+      async status(companyId, folderKey) {
         requireCapability(manifest, capabilitySet, "local.folders");
-        return {
-          folderKey,
-          configured: false,
-          path: null,
-          realPath: null,
-          access: "readWrite",
-          readable: false,
-          writable: false,
-          requiredDirectories: [],
-          requiredFiles: [],
-          missingDirectories: [],
-          missingFiles: [],
-          healthy: false,
-          problems: [{ code: "not_configured", message: "No local folder path is configured." }],
-          checkedAt: new Date().toISOString(),
-        };
+        return localFolderStatuses.get(localFolderKey(companyId, folderKey)) ?? notConfiguredLocalFolderStatus(folderKey);
       },
-      async list(_companyId, folderKey, options) {
+      async list(companyId, folderKey, options) {
         requireCapability(manifest, capabilitySet, "local.folders");
+        const status = localFolderStatuses.get(localFolderKey(companyId, folderKey));
+        if (!status?.configured) throw new Error("Local folder is not configured");
+        const prefix = normalizeLocalFolderRelativePath(options?.relativePath ?? "");
+        const prefixWithSlash = prefix ? `${prefix}/` : "";
+        const entries = new Map<string, PluginLocalFolderEntry>();
+        for (const [key, contents] of localFolderFiles) {
+          const filePrefix = `${localFolderKey(companyId, folderKey)}:`;
+          if (!key.startsWith(filePrefix)) continue;
+          const filePath = key.slice(filePrefix.length);
+          if (prefix && filePath !== prefix && !filePath.startsWith(prefixWithSlash)) continue;
+          const remainder = prefix ? filePath.slice(prefixWithSlash.length) : filePath;
+          const [name] = remainder.split("/");
+          if (!name) continue;
+          const entryPath = prefix ? `${prefix}/${name}` : name;
+          const isNested = remainder.includes("/");
+          if (!options?.recursive && isNested) {
+            entries.set(entryPath, {
+              path: entryPath,
+              name,
+              kind: "directory",
+              size: null,
+              modifiedAt: null,
+            });
+            continue;
+          }
+          entries.set(filePath, {
+            path: filePath,
+            name: filePath.split("/").pop() ?? filePath,
+            kind: "file",
+            size: Buffer.byteLength(contents, "utf8"),
+            modifiedAt: null,
+          });
+        }
+        const maxEntries = options?.maxEntries && options.maxEntries > 0 ? options.maxEntries : entries.size;
+        const allEntries = [...entries.values()].sort((a, b) => a.path.localeCompare(b.path));
         return {
           folderKey,
           relativePath: options?.relativePath ?? null,
-          entries: [],
-          truncated: false,
+          entries: allEntries.slice(0, maxEntries),
+          truncated: allEntries.length > maxEntries,
         };
       },
-      async readText() {
+      async readText(companyId, folderKey, relativePath) {
         requireCapability(manifest, capabilitySet, "local.folders");
-        throw new Error("Test harness local folder readText is not implemented");
+        const normalizedPath = normalizeLocalFolderRelativePath(relativePath);
+        const contents = localFolderFiles.get(localFolderFileKey(companyId, folderKey, normalizedPath));
+        if (contents === undefined) throw new Error(`Local folder file not found: ${relativePath}`);
+        return contents;
       },
-      async writeTextAtomic(_companyId, folderKey) {
+      async writeTextAtomic(companyId, folderKey, relativePath, contents) {
         requireCapability(manifest, capabilitySet, "local.folders");
-        return {
+        const status = localFolderStatuses.get(localFolderKey(companyId, folderKey)) ?? {
           folderKey,
-          configured: false,
-          path: null,
-          realPath: null,
+          configured: true,
+          path: `memory://${manifest.id}/${companyId}/${folderKey}`,
+          realPath: `memory://${manifest.id}/${companyId}/${folderKey}`,
           access: "readWrite",
-          readable: false,
-          writable: false,
+          readable: true,
+          writable: true,
           requiredDirectories: [],
           requiredFiles: [],
           missingDirectories: [],
           missingFiles: [],
-          healthy: false,
-          problems: [{ code: "not_configured", message: "No local folder path is configured." }],
+          healthy: true,
+          problems: [],
           checkedAt: new Date().toISOString(),
-        };
+        } satisfies PluginLocalFolderStatus;
+        if (status.access !== "readWrite" || !status.writable) {
+          throw new Error("Local folder is not configured for writes");
+        }
+        localFolderStatuses.set(localFolderKey(companyId, folderKey), status);
+        localFolderFiles.set(localFolderFileKey(companyId, folderKey, normalizeLocalFolderRelativePath(relativePath)), contents);
+        return status;
+      },
+      async deleteFile(companyId, folderKey, relativePath) {
+        requireCapability(manifest, capabilitySet, "local.folders");
+        const status = localFolderStatuses.get(localFolderKey(companyId, folderKey)) ?? notConfiguredLocalFolderStatus(folderKey);
+        if (status.configured && (status.access !== "readWrite" || !status.writable)) {
+          throw new Error("Local folder is not configured for writes");
+        }
+        localFolderFiles.delete(localFolderFileKey(companyId, folderKey, normalizeLocalFolderRelativePath(relativePath)));
+        return status;
       },
     },
     events: {
@@ -824,6 +1071,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             leadAgentId: null,
             targetDate: null,
             color: declaration.color ?? null,
+            icon: null,
             env: null,
             pauseReason: null,
             pausedAt: null,
@@ -890,6 +1138,13 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           const resolved = await this.get(projectKey, companyId);
           return { ...resolved, status: resolved.project ? "reset" : resolved.status };
         },
+      },
+    },
+    executionWorkspaces: {
+      async get(workspaceId, companyId) {
+        requireCapability(manifest, capabilitySet, "execution.workspaces.read");
+        const workspace = executionWorkspaces.get(workspaceId);
+        return workspace?.companyId === companyId ? workspace : null;
       },
     },
     routines: {
@@ -985,20 +1240,23 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             parentIssueId: null,
             title: declaration.title,
             description: declaration.description ?? null,
+            responsibleUserId: null,
             assigneeAgentId,
             priority: declaration.priority ?? "medium",
             status: declaration.status ?? (assigneeAgentId ? "active" : "paused"),
             concurrencyPolicy: declaration.concurrencyPolicy ?? "coalesce_if_active",
             catchUpPolicy: declaration.catchUpPolicy ?? "skip_missed",
+            activityGatePolicy: declaration.activityGatePolicy ?? "always",
+            activityGateScope: declaration.activityGateScope ?? "company",
             variables: declaration.variables ?? [],
+            latestRevisionId: null,
+            latestRevisionNumber: 1,
             createdByAgentId: null,
             createdByUserId: null,
             updatedByAgentId: null,
             updatedByUserId: null,
             lastTriggeredAt: null,
             lastEnqueuedAt: null,
-            latestRevisionId: null,
-            latestRevisionNumber: 1,
             createdAt: now,
             updatedAt: now,
             managedByPlugin: {
@@ -1087,6 +1345,202 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
     },
+    skills: {
+      managed: {
+        async get(skillKey, companyId) {
+          requireCapability(manifest, capabilitySet, "skills.managed");
+          const declaration = manifest.skills?.find((skill) => skill.skillKey === skillKey);
+          if (!declaration) {
+            return {
+              pluginKey: manifest.id,
+              resourceKind: "skill",
+              resourceKey: skillKey,
+              companyId,
+              skillId: null,
+              skill: null,
+              status: "missing",
+              defaultDrift: null,
+            } satisfies PluginManagedSkillResolution;
+          }
+          const externalId = `${manifest.id}:skill:${skillKey}`;
+          const existingEntity = [...entities.values()].find((entity) =>
+            entity.entityType === "managed_resource"
+            && entity.scopeKind === "company"
+            && entity.scopeId === companyId
+            && entity.externalId === externalId
+          );
+          const existingSkill = existingEntity?.data?.skill as CompanySkill | undefined;
+          if (existingSkill && existingSkill.companyId === companyId) {
+            return {
+              pluginKey: manifest.id,
+              resourceKind: "skill",
+              resourceKey: skillKey,
+              companyId,
+              skillId: existingSkill.id,
+              skill: existingSkill,
+              status: "resolved",
+              defaultDrift: null,
+            } satisfies PluginManagedSkillResolution;
+          }
+          return {
+            pluginKey: manifest.id,
+            resourceKind: "skill",
+            resourceKey: skillKey,
+            companyId,
+            skillId: null,
+            skill: null,
+            status: "missing",
+            defaultDrift: null,
+          } satisfies PluginManagedSkillResolution;
+        },
+        async reconcile(skillKey, companyId) {
+          const existing = await this.get(skillKey, companyId);
+          if (existing.skill) return existing;
+          const declaration = manifest.skills?.find((skill) => skill.skillKey === skillKey);
+          if (!declaration) return existing;
+          const now = new Date();
+          const skill = {
+            id: randomUUID(),
+            companyId,
+            key: `plugin/${manifest.id.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}/${skillKey}`,
+            slug: declaration.slug ?? skillKey,
+            name: declaration.displayName,
+            description: declaration.description ?? null,
+            markdown: declaration.markdown ?? `# ${declaration.displayName}\n`,
+            sourceType: "catalog",
+            sourceLocator: null,
+            sourceRef: null,
+            trustLevel: "markdown_only",
+            compatibility: "compatible",
+            fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+            iconUrl: null,
+            color: null,
+            tagline: declaration.description?.slice(0, 120) ?? null,
+            authorName: null,
+            homepageUrl: null,
+            categories: [],
+            sharingScope: "company",
+            publicShareToken: null,
+            forkedFromSkillId: null,
+            forkedFromCompanyId: null,
+            starCount: 0,
+            installCount: 1,
+            forkCount: 0,
+            currentVersionId: null,
+            metadata: {
+              sourceKind: "catalog",
+              pluginManagedResource: {
+                pluginKey: manifest.id,
+                resourceKind: "skill",
+                resourceKey: skillKey,
+              },
+            },
+            createdAt: now,
+            updatedAt: now,
+          } satisfies CompanySkill;
+          const nowIso = now.toISOString();
+          const record: PluginEntityRecord = {
+            id: randomUUID(),
+            entityType: "managed_resource",
+            scopeKind: "company",
+            scopeId: companyId,
+            externalId: `${manifest.id}:skill:${skillKey}`,
+            title: declaration.displayName,
+            status: null,
+            data: { resourceKind: "skill", resourceKey: skillKey, skillId: skill.id, skill },
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          };
+          entities.set(record.id, record);
+          return {
+            pluginKey: manifest.id,
+            resourceKind: "skill",
+            resourceKey: skillKey,
+            companyId,
+            skillId: skill.id,
+            skill,
+            status: "created",
+            defaultDrift: null,
+          } satisfies PluginManagedSkillResolution;
+        },
+        async reset(skillKey, companyId) {
+          requireCapability(manifest, capabilitySet, "skills.managed");
+          const existing = await this.get(skillKey, companyId);
+          const declaration = manifest.skills?.find((skill) => skill.skillKey === skillKey);
+          if (!declaration) return existing;
+          const now = new Date();
+          const skill = {
+            id: existing.skill?.id ?? randomUUID(),
+            companyId,
+            key: `plugin/${manifest.id.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}/${skillKey}`,
+            slug: declaration.slug ?? skillKey,
+            name: declaration.displayName,
+            description: declaration.description ?? null,
+            markdown: declaration.markdown ?? `# ${declaration.displayName}\n`,
+            sourceType: "catalog",
+            sourceLocator: null,
+            sourceRef: null,
+            trustLevel: "markdown_only",
+            compatibility: "compatible",
+            fileInventory: [{ path: "SKILL.md", kind: "skill" }],
+            iconUrl: null,
+            color: null,
+            tagline: declaration.description?.slice(0, 120) ?? null,
+            authorName: null,
+            homepageUrl: null,
+            categories: [],
+            sharingScope: "company",
+            publicShareToken: null,
+            forkedFromSkillId: null,
+            forkedFromCompanyId: null,
+            starCount: existing.skill?.starCount ?? 0,
+            installCount: existing.skill?.installCount ?? 1,
+            forkCount: existing.skill?.forkCount ?? 0,
+            currentVersionId: existing.skill?.currentVersionId ?? null,
+            metadata: {
+              sourceKind: "catalog",
+              pluginManagedResource: {
+                pluginKey: manifest.id,
+                resourceKind: "skill",
+                resourceKey: skillKey,
+              },
+            },
+            createdAt: existing.skill?.createdAt ?? now,
+            updatedAt: now,
+          } satisfies CompanySkill;
+          const nowIso = now.toISOString();
+          const existingEntity = [...entities.values()].find((entity) =>
+            entity.entityType === "managed_resource" &&
+            entity.scopeKind === "company" &&
+            entity.scopeId === companyId &&
+            entity.externalId === `${manifest.id}:skill:${skillKey}`,
+          );
+          const record: PluginEntityRecord = {
+            id: existingEntity?.id ?? randomUUID(),
+            entityType: "managed_resource",
+            scopeKind: "company",
+            scopeId: companyId,
+            externalId: `${manifest.id}:skill:${skillKey}`,
+            title: declaration.displayName,
+            status: null,
+            data: { resourceKind: "skill", resourceKey: skillKey, skillId: skill.id, skill },
+            createdAt: existingEntity?.createdAt ?? nowIso,
+            updatedAt: nowIso,
+          };
+          entities.set(record.id, record);
+          return {
+            pluginKey: manifest.id,
+            resourceKind: "skill",
+            resourceKey: skillKey,
+            companyId,
+            skillId: skill.id,
+            skill,
+            status: "reset",
+            defaultDrift: null,
+          } satisfies PluginManagedSkillResolution;
+        },
+      },
+    },
     companies: {
       async list(input) {
         requireCapability(manifest, capabilitySet, "companies.read");
@@ -1147,8 +1601,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           title: input.title,
           description: input.description ?? null,
           status: input.status ?? "todo",
-          workMode: input.workMode ?? "standard",
+          workMode: "standard",
           priority: input.priority ?? "medium",
+          reviewPolicy: null,
           assigneeAgentId: input.assigneeAgentId ?? null,
           assigneeUserId: input.assigneeUserId ?? null,
           checkoutRunId: null,
@@ -1157,6 +1612,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           executionLockedAt: null,
           createdByAgentId: null,
           createdByUserId: null,
+          responsibleUserId: null,
           issueNumber: null,
           identifier: null,
           originKind,
@@ -1164,7 +1620,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           originRunId: input.originRunId ?? null,
           requestDepth: input.requestDepth ?? 0,
           billingCode: input.billingCode ?? null,
-          assigneeAdapterOverrides: null,
+          assigneeAdapterOverrides: input.assigneeAdapterOverrides ?? null,
           executionWorkspaceId: input.executionWorkspaceId ?? null,
           executionWorkspacePreference: input.executionWorkspacePreference ?? null,
           executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
@@ -1248,22 +1704,31 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       async listComments(issueId, companyId) {
         requireCapability(manifest, capabilitySet, "issue.comments.read");
         if (!isInCompany(issues.get(issueId), companyId)) return [];
-        return issueComments.get(issueId) ?? [];
+        return (issueComments.get(issueId) ?? []).map((comment) =>
+          comment.deletedAt ? { ...comment, body: "", presentation: null, metadata: null } : comment
+        );
       },
       async createComment(issueId, body, companyId, options) {
         requireCapability(manifest, capabilitySet, "issue.comments.create");
+        if (options?.actorUserId) {
+          requireCapability(manifest, capabilitySet, "issue.comments.create_human_attributed");
+        }
         const parentIssue = issues.get(issueId);
         if (!isInCompany(parentIssue, companyId)) {
           throw new Error(`Issue not found: ${issueId}`);
+        }
+        if (options?.actorUserId) {
+          assertActiveHumanMemberCanWrite(companyId, options.actorUserId);
         }
         const now = new Date();
         const comment: IssueComment = {
           id: randomUUID(),
           companyId: parentIssue.companyId,
           issueId,
-          authorType: options?.authorAgentId ? "agent" : "system",
-          authorAgentId: options?.authorAgentId ?? null,
-          authorUserId: null,
+          authorType: options?.actorUserId ? "user" : options?.authorAgentId ? "agent" : "system",
+          authorAgentId: options?.actorUserId ? null : options?.authorAgentId ?? null,
+          authorUserId: options?.actorUserId ?? null,
+          onBehalfOfUserId: null,
           body,
           presentation: null,
           metadata: null,
@@ -1319,6 +1784,69 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       async requestConfirmation(issueId, interaction, companyId, options) {
         return this.createInteraction(issueId, { ...interaction, kind: "request_confirmation" }, companyId, options) as Promise<any>;
       },
+      async requestCheckboxConfirmation(issueId, interaction, companyId, options) {
+        return this.createInteraction(issueId, { ...interaction, kind: "request_checkbox_confirmation" }, companyId, options) as Promise<any>;
+      },
+      async listInteractions(issueId, companyId) {
+        requireCapability(manifest, capabilitySet, "issue.interactions.read");
+        if (!isInCompany(issues.get(issueId), companyId)) return [];
+        return issueInteractions.get(issueId) ?? [];
+      },
+      async respondInteraction(issueId, interactionId, input, companyId) {
+        requireCapability(manifest, capabilitySet, "issue.interactions.respond");
+        const parentIssue = issues.get(issueId);
+        if (!isInCompany(parentIssue, companyId)) {
+          throw new Error(`Issue not found: ${issueId}`);
+        }
+        if (!input.actorUserId) {
+          throw new Error("actorUserId is required to respond to an interaction on behalf of a board user");
+        }
+        const actorUserId = input.actorUserId;
+        // Mirror the host's active-human-member write re-verification.
+        assertActiveHumanMemberCanWrite(companyId, actorUserId);
+        const list = issueInteractions.get(issueId) ?? [];
+        const current = list.find((entry) => entry.id === interactionId);
+        if (!current) {
+          throw new Error(`Interaction not found: ${interactionId}`);
+        }
+        if (current.status !== "pending") {
+          return { interaction: current, applied: false };
+        }
+        const resolved: IssueThreadInteraction = {
+          ...current,
+          status: input.action === "accept" ? "accepted" : "rejected",
+          updatedAt: new Date(),
+        } as IssueThreadInteraction;
+        const index = list.indexOf(current);
+        list[index] = resolved;
+        issueInteractions.set(issueId, list);
+        return { interaction: resolved, applied: true };
+      },
+      async listAttachments(issueId, companyId) {
+        requireCapability(manifest, capabilitySet, "issue.attachments.read");
+        if (!isInCompany(issues.get(issueId), companyId)) return [];
+        return issueAttachments.get(issueId) ?? [];
+      },
+      async getAttachmentContent(attachmentId, companyId, options) {
+        requireCapability(manifest, capabilitySet, "issue.attachments.read");
+        const attachment = [...issueAttachments.values()]
+          .flat()
+          .find((entry) => entry.id === attachmentId);
+        if (!attachment || attachment.companyId !== companyId) return null;
+        const maxBytes = typeof options?.maxBytes === "number" && options.maxBytes > 0 ? options.maxBytes : null;
+        if (maxBytes !== null && attachment.byteSize > maxBytes) {
+          throw new Error(`attachment ${attachment.id} is ${attachment.byteSize} bytes, over the ${maxBytes}-byte cap`);
+        }
+        const contentBase64 = attachmentContentById.get(attachment.id) ?? "";
+        return {
+          attachmentId: attachment.id,
+          contentType: attachment.contentType,
+          byteSize: attachment.byteSize,
+          sha256: attachment.sha256,
+          originalFilename: attachment.originalFilename ?? null,
+          contentBase64,
+        };
+      },
       documents: {
         async list(issueId, companyId) {
           requireCapability(manifest, capabilitySet, "issue.documents.read");
@@ -1353,6 +1881,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             createdByUserId: existing?.createdByUserId ?? null,
             updatedByAgentId: null,
             updatedByUserId: null,
+            lockedAt: existing?.lockedAt ?? null,
+            lockedByAgentId: existing?.lockedByAgentId ?? null,
+            lockedByUserId: existing?.lockedByUserId ?? null,
             createdAt: existing?.createdAt ?? now,
             updatedAt: now,
             body: input.body,
@@ -1467,6 +1998,47 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
     },
+    approvals: {
+      async list(input) {
+        requireCapability(manifest, capabilitySet, "approvals.read");
+        return [...approvals.values()].filter(
+          (approval) =>
+            approval.companyId === input.companyId
+            && (!input.status || approval.status === input.status),
+        );
+      },
+      async get(approvalId, companyId) {
+        requireCapability(manifest, capabilitySet, "approvals.read");
+        const approval = approvals.get(approvalId);
+        if (!approval || approval.companyId !== companyId) return null;
+        return approval;
+      },
+      async decide(approvalId, input, companyId) {
+        requireCapability(manifest, capabilitySet, "approvals.respond");
+        const approval = approvals.get(approvalId);
+        if (!approval || approval.companyId !== companyId) {
+          throw new Error(`Approval not found: ${approvalId}`);
+        }
+        if (!input.actorUserId) {
+          throw new Error("actorUserId is required to decide an approval on behalf of a board user");
+        }
+        const actorUserId = input.actorUserId;
+        assertActiveHumanMemberCanWrite(companyId, actorUserId);
+        if (approval.status !== "pending") {
+          return { approval, applied: false };
+        }
+        const decided: Approval = {
+          ...approval,
+          status: input.action === "approve" ? "approved" : "rejected",
+          decisionNote: input.decisionNote ?? null,
+          decidedByUserId: actorUserId,
+          decidedAt: new Date(),
+          updatedAt: new Date(),
+        };
+        approvals.set(approvalId, decided);
+        return { approval: decided, applied: true };
+      },
+    },
     agents: {
       async list(input) {
         requireCapability(manifest, capabilitySet, "agents.read");
@@ -1560,7 +2132,10 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             spentMonthlyCents: 0,
             pauseReason: null,
             pausedAt: null,
-            permissions: { canCreateAgents: Boolean(declaration.permissions?.canCreateAgents) },
+            permissions: {
+              canCreateAgents: Boolean(declaration.permissions?.canCreateAgents),
+              canCreateSkills: declaration.permissions?.canCreateSkills !== false,
+            },
             lastHeartbeatAt: null,
             metadata: managedAgentMetadata(agentKey),
             createdAt: now,
@@ -1598,7 +2173,10 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
               spentMonthlyCents: 0,
               pauseReason: null,
               pausedAt: null,
-              permissions: { canCreateAgents: Boolean(declaration.permissions?.canCreateAgents) },
+              permissions: {
+                canCreateAgents: Boolean(declaration.permissions?.canCreateAgents),
+                canCreateSkills: declaration.permissions?.canCreateSkills !== false,
+              },
               lastHeartbeatAt: null,
               metadata: managedAgentMetadata(agentKey),
               createdAt: now,
@@ -1619,7 +2197,10 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             adapterConfig: declaration.adapterConfig ?? {},
             runtimeConfig: declaration.runtimeConfig ?? {},
             budgetMonthlyCents: declaration.budgetMonthlyCents ?? 0,
-            permissions: { canCreateAgents: Boolean(declaration.permissions?.canCreateAgents) },
+            permissions: {
+              canCreateAgents: Boolean(declaration.permissions?.canCreateAgents),
+              canCreateSkills: declaration.permissions?.canCreateSkills !== false,
+            },
             metadata: managedAgentMetadata(agentKey, resolved.agent.metadata),
             updatedAt: new Date(),
           };
@@ -1718,6 +2299,156 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return updated;
       },
     },
+    access: {
+      members: {
+        async list(input) {
+          requireCapability(manifest, capabilitySet, "access.members.read");
+          const cid = requireCompanyId(input.companyId);
+          const includeArchived = input.includeArchived === true;
+          return [...accessMembers.values()]
+            .filter((member) => member.companyId === cid)
+            .filter((member) => includeArchived || member.status !== ("archived" as PluginAccessMember["status"]))
+            .map((member) => ({
+              ...member,
+              grants: getPrincipalGrants(cid, member.principalType, member.principalId),
+            }));
+        },
+        async get(memberId, companyId) {
+          requireCapability(manifest, capabilitySet, "access.members.read");
+          const cid = requireCompanyId(companyId);
+          const member = accessMembers.get(memberId);
+          if (!member || member.companyId !== cid) return null;
+          return {
+            ...member,
+            grants: getPrincipalGrants(cid, member.principalType, member.principalId),
+          };
+        },
+        async update(memberId, patch, companyId) {
+          requireCapability(manifest, capabilitySet, "access.members.write");
+          const cid = requireCompanyId(companyId);
+          const member = accessMembers.get(memberId);
+          if (!member || member.companyId !== cid) {
+            throw new Error(`Membership not found: ${memberId}`);
+          }
+          const updated: PluginAccessMember = {
+            ...member,
+            membershipRole: patch.membershipRole === undefined ? member.membershipRole : patch.membershipRole,
+            status: patch.status === undefined ? member.status : patch.status,
+            updatedAt: new Date().toISOString(),
+          };
+          accessMembers.set(memberId, updated);
+          return {
+            ...updated,
+            grants: getPrincipalGrants(cid, updated.principalType, updated.principalId),
+          };
+        },
+      },
+      invites: {
+        async list(input) {
+          requireCapability(manifest, capabilitySet, "access.invites.read");
+          requireCompanyId(input.companyId);
+          return { invites: [], nextOffset: null };
+        },
+        async create(input) {
+          requireCapability(manifest, capabilitySet, "access.invites.write");
+          requireCompanyId(input.companyId);
+          throw new Error("Invite creation is not implemented in the plugin test harness");
+        },
+        async revoke(inviteId, companyId) {
+          requireCapability(manifest, capabilitySet, "access.invites.write");
+          requireCompanyId(companyId);
+          throw new Error(`Invite not found: ${inviteId}`);
+        },
+      },
+    },
+    authorization: {
+      grants: {
+        async list(input) {
+          requireCapability(manifest, capabilitySet, "authorization.grants.read");
+          const cid = requireCompanyId(input.companyId);
+          if (input.principalType && input.principalId) {
+            return getPrincipalGrants(cid, input.principalType, input.principalId);
+          }
+          const out: PrincipalPermissionGrant[] = [];
+          for (const [key, grants] of principalGrants.entries()) {
+            if (!key.startsWith(`${cid}:`)) continue;
+            for (const grant of grants) {
+              if (input.principalType && grant.principalType !== input.principalType) continue;
+              if (input.principalId && grant.principalId !== input.principalId) continue;
+              out.push(grant);
+            }
+          }
+          return out;
+        },
+        async set(input) {
+          requireCapability(manifest, capabilitySet, "authorization.grants.write");
+          const cid = requireCompanyId(input.companyId);
+          return setPrincipalGrants(cid, input.principalType, input.principalId, input.grants);
+        },
+      },
+      policies: {
+        async summary(companyId) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          const cid = requireCompanyId(companyId);
+          const members = [...accessMembers.values()].filter((member) => member.companyId === cid);
+          let grantCount = 0;
+          for (const [key, grants] of principalGrants.entries()) {
+            if (key.startsWith(`${cid}:`)) grantCount += grants.length;
+          }
+          return {
+            companyId: cid,
+            permissionsMode: "simple",
+            memberCount: members.length,
+            activeMemberCount: members.filter((member) => member.status === "active").length,
+            grantCount,
+            advancedPolicyAvailable: false,
+          };
+        },
+        async get(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          requireCompanyId(input.companyId);
+          return null;
+        },
+        async update(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.write");
+          const cid = requireCompanyId(input.companyId);
+          return {
+            companyId: cid,
+            resourceType: input.resourceType,
+            resourceId: input.resourceId,
+            policy: input.policy,
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        async previewAssignment(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          requireCompanyId(input.companyId);
+          return {
+            allowed: true,
+            action: "issue.assign",
+            explanation: "Allowed by simple company-wide defaults in the plugin test harness.",
+            reason: "simple_mode",
+          };
+        },
+        async explainAssignment(input) {
+          requireCapability(manifest, capabilitySet, "authorization.policies.read");
+          requireCompanyId(input.companyId);
+          return {
+            allowed: true,
+            action: "issue.assign",
+            explanation: "Allowed by simple company-wide defaults in the plugin test harness.",
+            reason: "simple_mode",
+          };
+        },
+      },
+      audit: {
+        async search(input) {
+          requireCapability(manifest, capabilitySet, "authorization.audit.read");
+          requireCompanyId(input.companyId);
+          return [];
+        },
+      },
+    },
     data: {
       register(key, handler) {
         dataHandlers.set(key, handler);
@@ -1742,6 +2473,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       };
     })(),
+    execution: {
+      log(_stream: "stdout" | "stderr", _chunk: string) {
+        // No-op in test harness — the host runner log sink is not wired here.
+      },
+    },
     tools: {
       register(name, _decl, fn) {
         requireCapability(manifest, capabilitySet, "agent.tools.register");
@@ -1774,6 +2510,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         logs.push({ level: "debug", message, meta });
       },
     },
+    tracer: NOOP_PLUGIN_TRACER,
   };
 
   const harness: TestHarness = {
@@ -1792,8 +2529,33 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         list.push(row);
         issueComments.set(row.issueId, list);
       }
+      for (const row of input.issueInteractions ?? []) {
+        const list = issueInteractions.get(row.issueId) ?? [];
+        list.push(row);
+        issueInteractions.set(row.issueId, list);
+      }
+      for (const row of input.issueAttachments ?? []) {
+        const { contentBase64, ...attachment } = row;
+        const list = issueAttachments.get(attachment.issueId) ?? [];
+        list.push(attachment);
+        issueAttachments.set(attachment.issueId, list);
+        attachmentContentById.set(attachment.id, contentBase64 ?? "");
+      }
+      for (const row of input.approvals ?? []) approvals.set(row.id, row);
       for (const row of input.agents ?? []) agents.set(row.id, row);
       for (const row of input.goals ?? []) goals.set(row.id, row);
+      for (const row of input.projectWorkspaces ?? []) {
+        const list = projectWorkspaces.get(row.projectId) ?? [];
+        list.push(row);
+        projectWorkspaces.set(row.projectId, list);
+      }
+      for (const row of input.executionWorkspaces ?? []) executionWorkspaces.set(row.id, row);
+      for (const row of input.accessMembers ?? []) accessMembers.set(row.id, row);
+      for (const row of input.principalGrants ?? []) {
+        const list = principalGrants.get(principalGrantsKey(row.companyId, row.principalType, row.principalId)) ?? [];
+        list.push(row);
+        principalGrants.set(principalGrantsKey(row.companyId, row.principalType, row.principalId), list);
+      }
     },
     setConfig(config) {
       currentConfig = { ...config };
@@ -1836,10 +2598,15 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       if (!handler) throw new Error(`No data handler registered for '${key}'`);
       return await handler(params) as T;
     },
-    async performAction<T = unknown>(key: string, params: Record<string, unknown> = {}) {
+    async performAction<T = unknown>(
+      key: string,
+      params: Record<string, unknown> = {},
+      options?: TestHarnessPerformActionOptions,
+    ) {
       const handler = actionHandlers.get(key);
       if (!handler) throw new Error(`No action handler registered for '${key}'`);
-      return await handler(params) as T;
+      const context = actionContextFor(params, options);
+      return await handler(paramsWithHostCompanyScope(params, context, options), context) as T;
     },
     async executeTool<T = ToolResult>(name: string, params: unknown, runCtx: Partial<ToolRunContext> = {}) {
       const handler = toolHandlers.get(name);
@@ -1951,6 +2718,46 @@ export function createEnvironmentTestHarness(options: EnvironmentTestHarnessOpti
     },
     async execute(params) {
       return callHook("execute", driver.onExecute, params, "onExecute");
+    },
+    async startInteractiveSetup(params) {
+      return callHook(
+        "startInteractiveSetup",
+        driver.onStartInteractiveSetup,
+        params,
+        "onStartInteractiveSetup",
+      );
+    },
+    async getInteractiveSetup(params) {
+      return callHook(
+        "getInteractiveSetup",
+        driver.onGetInteractiveSetup,
+        params,
+        "onGetInteractiveSetup",
+      );
+    },
+    async captureTemplate(params) {
+      return callHook(
+        "captureTemplate",
+        driver.onCaptureTemplate,
+        params,
+        "onCaptureTemplate",
+      );
+    },
+    async cancelInteractiveSetup(params) {
+      return callHook(
+        "cancelInteractiveSetup",
+        driver.onCancelInteractiveSetup,
+        params,
+        "onCancelInteractiveSetup",
+      );
+    },
+    async deleteTemplate(params) {
+      return callHook(
+        "deleteTemplate",
+        driver.onDeleteTemplate,
+        params,
+        "onDeleteTemplate",
+      );
     },
   };
 
