@@ -49,6 +49,8 @@ const STREAMLINED_TOGGLE_SELECTOR =
   'button[aria-label="Toggle streamlined left navigation experimental setting"]';
 const TASK_WATCHDOGS_TOGGLE_SELECTOR =
   'button[aria-label="Toggle task watchdogs experimental setting"]';
+const TASK_CHAT_REDESIGN_TOGGLE_SELECTOR =
+  'button[aria-label="Toggle chat-style tasks experimental setting"]';
 const GOALS_SIDEBAR_LINK_TOGGLE_SELECTOR =
   'button[aria-label="Toggle goals sidebar link experimental setting"]';
 const DECISIONS_TOGGLE_SELECTOR =
@@ -57,6 +59,8 @@ const SERVER_INFO_TOGGLE_SELECTOR =
   'button[aria-label="Toggle server info debug view experimental setting"]';
 const BUILT_IN_AGENTS_TOGGLE_SELECTOR =
   'button[aria-label="Toggle built-in agents experimental setting"]';
+const BETA_SKILLS_TOGGLE_SELECTOR =
+  'button[aria-label="Toggle beta skills experimental setting"]';
 const APPS_TOGGLE_SELECTOR = 'button[aria-label="Toggle apps experimental setting"]';
 const SUMMARIES_TOGGLE_SELECTOR =
   'button[aria-label="Toggle summaries experimental setting"]';
@@ -74,23 +78,26 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enablePipelines: false,
     enableCases: false,
     enableConferenceRoomChat: false,
+    enableTaskChatRedesign: false,
     enableIssuePlanDecompositions: false,
     enableExperimentalFileViewer: false,
     enableExternalObjects: false,
     enableBuiltInAgents: false,
+    enableBetaSkills: false,
     enableSummaries: false,
     enableStatusCards: false,
     enableDecisions: false,
     enableGoalsSidebarLink: false,
     enableTaskWatchdogs: false,
-    enableCloudSync: false,
     enableServerInfoDebugView: false,
+    enableSimplifiedEnglishInteractions: false,
     enableSmokeLab: false,
     autoRestartDevServerWhenIdle: false,
     enableIssueGraphLivenessAutoRecovery: false,
     issueGraphLivenessAutoRecoveryLookbackHours: 24,
     enableWorkspaceBranchReconcileForward: true,
     enableWorkspaceDirtyQuarantineRepair: true,
+    enableOwnerInstanceAdmin: false,
     enableWorktreeRunExecution: false,
     worktreeRunExecutionActivatedAt: null,
     worktreeRunExecutionActivationInstanceId: null,
@@ -287,6 +294,52 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     });
   });
 
+  it("renders and patches the Chat-Style Tasks experimental toggle on and off", async () => {
+    await renderPage();
+
+    expect(container.textContent).toContain("Chat-Style Tasks");
+    expect(container.textContent).toContain(
+      "Reimagines the task detail page as a live conversation with your agents",
+    );
+    expect(container.textContent).toContain(
+      "Turning this off instantly restores the classic task page. No task data is affected.",
+    );
+
+    const toggle = container.querySelector<HTMLButtonElement>(TASK_CHAT_REDESIGN_TOGGLE_SELECTOR);
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      toggle?.click();
+    });
+    await flushReact();
+
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
+      enableTaskChatRedesign: true,
+    });
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+
+    flushSync(() => {
+      root?.unmount();
+    });
+    root = null;
+    container.textContent = "";
+    await renderPage();
+
+    const enabledToggle = container.querySelector<HTMLButtonElement>(
+      TASK_CHAT_REDESIGN_TOGGLE_SELECTOR,
+    );
+    expect(enabledToggle?.getAttribute("aria-checked")).toBe("true");
+
+    await act(async () => {
+      enabledToggle?.click();
+    });
+    await flushReact();
+
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({
+      enableTaskChatRedesign: false,
+    });
+  });
+
   it("renders and patches the Decisions experimental toggle", async () => {
     await renderPage();
 
@@ -442,6 +495,26 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
 
     expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
       enableBuiltInAgents: true,
+    });
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("renders and patches the Beta skills experimental toggle", async () => {
+    await renderPage();
+
+    expect(container.textContent).toContain("Beta skills");
+    expect(container.textContent).toContain("pin beta releases of the Paperclip core skill");
+
+    const toggle = container.querySelector<HTMLButtonElement>(BETA_SKILLS_TOGGLE_SELECTOR);
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      toggle?.click();
+    });
+    await flushReact();
+
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
+      enableBetaSkills: true,
     });
     expect(toggle?.getAttribute("aria-checked")).toBe("true");
   });
@@ -788,5 +861,69 @@ describe("InstanceExperimentalSettings — cloud-managed keys", () => {
     await act(() => appsToggle?.click());
     await flushReact();
     expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({ enableApps: true });
+  });
+});
+
+describe("InstanceExperimentalSettings — card ordering and headings (PAP-393)", () => {
+  let container: HTMLDivElement;
+  let root: Root | null = null;
+
+  async function renderPage(settings: InstanceExperimentalSettingsWithManaged) {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ ...settings });
+    root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    flushSync(() => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <InstanceExperimentalSettings />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+  }
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    mockInstanceSettingsApi.updateExperimental.mockImplementation(async (patch) => ({
+      ...defaultExperimentalSettings(),
+      ...patch,
+    }));
+  });
+
+  afterEach(() => {
+    flushSync(() => {
+      root?.unmount();
+    });
+    root = null;
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("renders every card heading in alphabetical order", async () => {
+    await renderPage(defaultExperimentalSettings());
+
+    const headings = [...container.querySelectorAll("h2")].map(
+      (heading) => heading.textContent ?? "",
+    );
+
+    // Sanity: the page rendered a meaningful set of cards, not an empty list.
+    expect(headings.length).toBeGreaterThan(10);
+
+    const alphabetical = [...headings].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" }),
+    );
+    expect(headings).toEqual(alphabetical);
+  });
+
+  it("no longer renders an 'Experimental' secondary badge on any card", async () => {
+    await renderPage(defaultExperimentalSettings());
+
+    const badges = [...container.querySelectorAll('[data-slot="badge"]')].map(
+      (badge) => badge.textContent?.trim(),
+    );
+    expect(badges).not.toContain("Experimental");
   });
 });
