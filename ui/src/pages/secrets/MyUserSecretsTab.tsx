@@ -10,6 +10,7 @@ import { queryKeys } from "../../lib/queryKeys";
 import { cn } from "../../lib/utils";
 import { useToastActions } from "../../context/ToastContext";
 import { SetMyUserSecretDialog } from "./SetMyUserSecretDialog";
+import { SecretPathName } from "./SecretPathName";
 import {
   myValueLabel,
   myValueState,
@@ -136,12 +137,12 @@ function MyUserSecretRow({
     >
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="font-medium text-foreground">{definition.name}</span>
-          <code className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+          <SecretPathName name={definition.name} />
+          <code className="rounded bg-muted px-1.5 py-0.5 text-(length:--text-micro) text-muted-foreground">
             {definition.key}
           </code>
           {disabledDefinition ? (
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="text-(length:--text-nano)">
               {definition.status}
             </Badge>
           ) : null}
@@ -150,12 +151,12 @@ function MyUserSecretRow({
           <p className="mt-1 text-xs text-muted-foreground">{definition.description}</p>
         ) : null}
         {definition.usageGuidance ? (
-          <p className="mt-1 text-[11px] text-muted-foreground/80">{definition.usageGuidance}</p>
+          <p className="mt-1 text-(length:--text-micro) text-muted-foreground/80">{definition.usageGuidance}</p>
         ) : null}
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
-        <Badge variant="outline" className={cn("text-[11px]", myValueTone(state))}>
+        <Badge variant="outline" className={cn("text-(length:--text-micro)", myValueTone(state))}>
           {myValueLabel(state)}
         </Badge>
         {!disabledDefinition ? (

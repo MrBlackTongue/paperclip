@@ -12,6 +12,10 @@ const mockHeartbeatsApi = vi.hoisted(() => ({
   liveRunsForCompany: vi.fn(),
 }));
 
+const mockAttentionApi = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
 const mockInstanceSettingsApi = vi.hoisted(() => ({
   getExperimental: vi.fn(),
 }));
@@ -64,6 +68,10 @@ vi.mock("../context/SidebarContext", () => ({
 
 vi.mock("../api/heartbeats", () => ({
   heartbeatsApi: mockHeartbeatsApi,
+}));
+
+vi.mock("../api/attention", () => ({
+  attentionApi: mockAttentionApi,
 }));
 
 vi.mock("../api/instanceSettings", () => ({
@@ -139,6 +147,7 @@ describe("Sidebar", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([]);
+    mockAttentionApi.list.mockResolvedValue({ items: [] });
     mockSidebar.isMobile = false;
     mockSidebar.collapsed = false;
     mockSidebar.peeking = false;
@@ -150,14 +159,17 @@ describe("Sidebar", () => {
     vi.clearAllMocks();
   });
 
-  it("links the top search icon to the search page without showing Search in Work nav", async () => {
+  it("shows Search as a nav item instead of a header icon", async () => {
+    // The header's spare width goes to the workspace name (which otherwise
+    // truncates at ~78px), so search lives in the nav list — still
+    // exactly one pointer affordance, just relocated.
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     const root = await renderSidebar();
 
-    const topSearchLink = container.querySelector('a[aria-label="Open search"]');
-    expect(topSearchLink?.getAttribute("href")).toBe("/search");
-    const workLinks = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
-    expect(workLinks).not.toContain("Search");
+    expect(container.querySelector('a[aria-label="Open search"]')).toBeNull();
+    const navSearchLink = [...container.querySelectorAll("nav a")]
+      .find((anchor) => anchor.textContent?.trim() === "Search");
+    expect(navSearchLink?.getAttribute("href")).toBe("/search");
 
     flushSync(() => {
       root.unmount();
@@ -174,10 +186,15 @@ describe("Sidebar", () => {
     const workSection = [...container.querySelectorAll("nav [data-plugin-launcher-zone]")]
       .find((node) => node.getAttribute("data-plugin-launcher-zone") === "sidebar");
     expect(workSection?.textContent).toContain("Plugin launcher outlet");
-    const workSectionContainer = workSection?.parentElement?.parentElement;
+    // The Work section is a Collapsible now (one extra wrapper level), so
+    // resolve the section root by walking up until the header label appears.
+    let workSectionContainer = workSection?.parentElement ?? null;
+    while (workSectionContainer && !workSectionContainer.textContent?.includes("Work")) {
+      workSectionContainer = workSectionContainer.parentElement;
+    }
     expect(workSectionContainer?.textContent).toContain("Work");
     expect(workSectionContainer?.textContent).toContain("Tasks");
-    expect(workSectionContainer?.textContent).toContain("Goals");
+    expect(workSectionContainer?.textContent).not.toContain("Goals");
 
     flushSync(() => {
       root.unmount();
@@ -284,6 +301,41 @@ describe("Sidebar", () => {
     });
   });
 
+  it("does not poll attention until Decisions is enabled", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableDecisions: false });
+    const root = await renderSidebar();
+
+    expect(mockAttentionApi.list).not.toHaveBeenCalled();
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("shows Status directly below Decisions in primary navigation", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableDecisions: true,
+      enableStatusCards: true,
+    });
+    const root = await renderSidebar();
+
+    const primaryNavLinks = [...container.querySelectorAll("nav > div:first-child a")];
+    const decisionsLink = primaryNavLinks.find(
+      (anchor) => anchor.textContent?.trim() === "Decisions",
+    );
+    const statusLink = primaryNavLinks.find((anchor) => anchor.getAttribute("href") === "/status");
+
+    expect(statusLink?.textContent).toContain("Status");
+    expect(statusLink?.textContent).toContain("beta");
+    expect(statusLink?.textContent).not.toContain("exp");
+    expect(statusLink?.textContent).not.toContain("cards");
+    expect(primaryNavLinks.indexOf(statusLink!)).toBe(primaryNavLinks.indexOf(decisionsLink!) + 1);
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
   it("shows Skills directly below Artifacts in Work", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     const root = await renderSidebar();
@@ -294,10 +346,8 @@ describe("Sidebar", () => {
     expect(artifactsLink?.getAttribute("href")).toBe("/artifacts");
 
     const navText = container.querySelector("nav")?.textContent ?? "";
-    expect(navText).toContain("Goals");
     expect(navText).toContain("Artifacts");
     expect(navText).toContain("Skills");
-    expect(navText.indexOf("Goals")).toBeLessThan(navText.indexOf("Artifacts"));
     expect(navText.indexOf("Artifacts")).toBeLessThan(navText.indexOf("Skills"));
 
     const sections = [...container.querySelectorAll("nav > div")];
@@ -305,6 +355,50 @@ describe("Sidebar", () => {
     const companySection = sections.find((section) => section.textContent?.startsWith("Company"));
     expect(workSection?.textContent).toContain("Skills");
     expect(companySection?.textContent).not.toContain("Skills");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("hides the Goals nav item by default", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableIsolatedWorkspaces: false,
+      enableGoalsSidebarLink: false,
+    });
+    const root = await renderSidebar();
+
+    expect([...container.querySelectorAll("nav a")].map((a) => a.textContent?.trim())).not.toContain("Goals");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("reserves the Goals nav slot while experimental settings are loading", async () => {
+    mockInstanceSettingsApi.getExperimental.mockImplementation(() => new Promise(() => {}));
+    const root = await renderSidebar();
+
+    expect([...container.querySelectorAll("nav a")].map((a) => a.textContent?.trim())).not.toContain("Goals");
+    expect(container.querySelector('[data-testid="sidebar-goals-placeholder"]')).not.toBeNull();
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("shows the Goals nav item when the experimental setting is enabled", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({
+      enableIsolatedWorkspaces: false,
+      enableGoalsSidebarLink: true,
+    });
+    const root = await renderSidebar();
+
+    const link = [...container.querySelectorAll("a")].find((anchor) => anchor.textContent === "Goals");
+    expect(link?.getAttribute("href")).toBe("/goals");
+
+    const navText = container.querySelector("nav")?.textContent ?? "";
+    expect(navText.indexOf("Goals")).toBeLessThan(navText.indexOf("Artifacts"));
 
     flushSync(() => {
       root.unmount();
@@ -385,6 +479,27 @@ describe("Sidebar", () => {
     });
   });
 
+  it("hides the Apps nav item unless experimental apps are enabled", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableApps: false });
+    const disabledRoot = await renderSidebar();
+
+    expect([...container.querySelectorAll("a")].some((anchor) => anchor.textContent === "Apps")).toBe(false);
+
+    flushSync(() => {
+      disabledRoot.unmount();
+    });
+
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableApps: true });
+    const enabledRoot = await renderSidebar();
+
+    const link = [...container.querySelectorAll("a")].find((anchor) => anchor.textContent === "Apps");
+    expect(link?.getAttribute("href")).toBe("/apps");
+
+    flushSync(() => {
+      enabledRoot.unmount();
+    });
+  });
+
   it("shows the Pipelines nav item when pipelines are enabled", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableIsolatedWorkspaces: false,
@@ -457,20 +572,25 @@ describe("Sidebar", () => {
     });
   });
 
-  it("keeps the collapsed rail top bar to just the company logo (no clipped search/toggle)", async () => {
-    // In the narrow rail the search/toggle controls don't fit beside the logo and
+  it("keeps the collapsed rail top bar to just the company logo (no clipped toggle)", async () => {
+    // In the narrow rail the collapse toggle doesn't fit beside the logo and
     // would overflow/clip, shoving the logo out of the icon column (PAP-10676), so
-    // they are dropped in the rail. Expansion stays reachable via hover-peek + Pin
-    // and Cmd/Ctrl+B. The full controls return as soon as the panel is expanded or
+    // it is dropped in the rail. Expansion stays reachable via hover-peek + Pin
+    // and Cmd/Ctrl+B. The toggle returns as soon as the panel is expanded or
     // peeking (covered by the other top-bar tests).
     mockSidebar.collapsed = true;
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     const root = await renderSidebar();
 
     expect(container.querySelector('button[aria-label="Expand sidebar"]')).toBeNull();
-    expect(container.querySelector('a[aria-label="Open search"]')).toBeNull();
     // The company menu (company switcher / logo) is still present in the rail.
     expect(container.textContent).toContain("Company menu");
+    // Search survives the rail as an icon-only nav item — the old
+    // header icon was dropped entirely here, leaving the rail with no visible
+    // search affordance.
+    const railSearchLink = [...container.querySelectorAll("nav a")]
+      .find((anchor) => anchor.getAttribute("href") === "/search");
+    expect(railSearchLink).toBeTruthy();
 
     flushSync(() => {
       root.unmount();

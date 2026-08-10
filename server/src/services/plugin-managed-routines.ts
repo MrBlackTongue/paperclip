@@ -49,6 +49,8 @@ function buildRoutineDefaults(declaration: PluginManagedRoutineDeclaration) {
     priority: declaration.priority ?? "medium",
     concurrencyPolicy: declaration.concurrencyPolicy ?? "coalesce_if_active",
     catchUpPolicy: declaration.catchUpPolicy ?? "skip_missed",
+    activityGatePolicy: declaration.activityGatePolicy ?? "always",
+    activityGateScope: declaration.activityGateScope ?? "company",
     variables: declaration.variables ?? [],
     assigneeAdapterOverrides: declaration.assigneeAdapterOverrides ?? null,
     triggers: declaration.triggers ?? [],
@@ -371,6 +373,8 @@ export function pluginManagedRoutineService(
       status: declaration.status ?? (refs.assigneeAgentId ? "active" : "paused"),
       concurrencyPolicy: declaration.concurrencyPolicy ?? "coalesce_if_active",
       catchUpPolicy: declaration.catchUpPolicy ?? "skip_missed",
+      activityGatePolicy: declaration.activityGatePolicy ?? "always",
+      activityGateScope: declaration.activityGateScope ?? "company",
       variables: declaration.variables ?? [],
       assigneeAdapterOverrides: declaration.assigneeAdapterOverrides ?? null,
     }, { agentId: null, userId: null });
@@ -432,6 +436,8 @@ export function pluginManagedRoutineService(
       status: declaration.status ?? (refs.assigneeAgentId ? "active" : "paused"),
       concurrencyPolicy: declaration.concurrencyPolicy ?? "coalesce_if_active",
       catchUpPolicy: declaration.catchUpPolicy ?? "skip_missed",
+      activityGatePolicy: declaration.activityGatePolicy ?? "always",
+      activityGateScope: declaration.activityGateScope ?? "company",
       variables: declaration.variables ?? [],
       assigneeAdapterOverrides: declaration.assigneeAdapterOverrides ?? null,
     }, { agentId: null, userId: null });

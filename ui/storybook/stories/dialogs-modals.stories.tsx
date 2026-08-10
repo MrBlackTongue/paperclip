@@ -137,6 +137,7 @@ const documentRevisions: DocumentRevision[] = [
 
 const closeReadinessReady: ExecutionWorkspaceCloseReadiness = {
   workspaceId: "execution-workspace-storybook",
+  deliveryState: "unmerged",
   state: "ready_with_warnings",
   blockingReasons: [],
   warnings: [
@@ -384,6 +385,7 @@ function hydrateDialogQueries(queryClient: ReturnType<typeof useQueryClient>) {
         supportsLocalAgentJwt: true,
         requiresMaterializedRuntimeSkills: false,
         supportsModelProfiles: true,
+        supportsAcp: true,
       },
     },
     {
@@ -399,6 +401,7 @@ function hydrateDialogQueries(queryClient: ReturnType<typeof useQueryClient>) {
         supportsLocalAgentJwt: true,
         requiresMaterializedRuntimeSkills: false,
         supportsModelProfiles: true,
+        supportsAcp: true,
       },
     },
   ]);
@@ -732,6 +735,7 @@ function useCheapLaneAdapterOverrides(variant: CheapLaneVariant) {
           supportsLocalAgentJwt: true,
           requiresMaterializedRuntimeSkills: false,
           supportsModelProfiles: true,
+          supportsAcp: true,
         },
       },
       {
@@ -747,6 +751,7 @@ function useCheapLaneAdapterOverrides(variant: CheapLaneVariant) {
           supportsLocalAgentJwt: true,
           requiresMaterializedRuntimeSkills: true,
           supportsModelProfiles: false,
+          supportsAcp: false,
         },
       },
     ]);

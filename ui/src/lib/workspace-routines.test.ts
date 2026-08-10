@@ -22,6 +22,8 @@ function createRoutine(overrides: Partial<RoutineListItem> = {}): RoutineListIte
     concurrencyPolicy: "coalesce_if_active",
     assigneeAdapterOverrides: null,
     catchUpPolicy: "skip_missed",
+    activityGatePolicy: "always",
+    activityGateScope: "company",
     variables: [],
     latestRevisionId: null,
     latestRevisionNumber: 1,

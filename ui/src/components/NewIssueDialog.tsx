@@ -73,6 +73,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "../lib/utils";
 import { extractProviderIdWithFallback } from "../lib/model-utils";
 import { issueStatusText, issueStatusTextDefault, priorityColor, priorityColorDefault } from "../lib/status-colors";
+import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 import { MarkdownEditor, type MarkdownEditorRef, type MentionOption } from "./MarkdownEditor";
 import { AgentIcon } from "./AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
@@ -115,6 +116,7 @@ type StagedIssueFile = {
   title?: string | null;
 };
 
+import { Badge } from "@/components/ui/badge";
 import {
   buildAssigneeAdapterOverrides,
   ISSUE_OVERRIDE_ADAPTER_TYPES,
@@ -405,7 +407,7 @@ const IssueDescriptionEditor = memo(function IssueDescriptionEditor({
       placeholder="Add description..."
       bordered={false}
       mentions={mentions}
-      contentClassName={cn("text-sm text-muted-foreground pb-12", expanded ? "min-h-[220px]" : "min-h-[120px]")}
+      contentClassName={cn("text-sm text-muted-foreground pb-12", expanded ? "min-h-(--sz-220px)" : "min-h-(--sz-120px)")}
       imageUploadHandler={imageUploadHandler}
     />
   );
@@ -519,7 +521,7 @@ export function NewIssueDialog() {
   });
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const activeProjects = useMemo(
-    () => (projects ?? []).filter((p) => !p.archivedAt),
+    () => projects ?? [],
     [projects],
   );
   const { orderedProjects } = useProjectOrder({
@@ -1277,9 +1279,9 @@ export function NewIssueDialog() {
         aria-describedby={undefined}
         style={{ "--new-issue-dialog-height": MOBILE_DIALOG_HEIGHT } as CSSProperties}
         className={cn(
-          "flex h-[var(--new-issue-dialog-height)] max-h-[var(--new-issue-dialog-height)] flex-col gap-0 overflow-hidden p-0 sm:h-auto",
+          "flex h-(--new-issue-dialog-height) max-h-(--new-issue-dialog-height) flex-col gap-0 overflow-hidden p-0 sm:h-auto",
           expanded
-            ? "sm:max-w-2xl sm:h-[var(--new-issue-dialog-height)]"
+            ? "sm:max-w-2xl sm:h-(--new-issue-dialog-height)"
             : "sm:max-w-lg"
         )}
         onKeyDown={handleKeyDown}
@@ -1352,7 +1354,7 @@ export function NewIssueDialog() {
                   >
                     <span
                       className={cn(
-                        "px-1 py-0.5 rounded text-[10px] font-semibold leading-none",
+                        "px-1 py-0.5 rounded text-(length:--text-nano) font-semibold leading-none",
                         !c.brandColor && "bg-muted",
                       )}
                       style={
@@ -1504,7 +1506,7 @@ export function NewIssueDialog() {
                     <>
                       <span
                         className="h-3.5 w-3.5 shrink-0 rounded-sm"
-                        style={{ backgroundColor: currentProject.color ?? "#6366f1" }}
+                        style={{ backgroundColor: currentProject.color ?? "var(--project-seed)" }}
                       />
                       <span className="truncate">{option.label}</span>
                     </>
@@ -1519,7 +1521,7 @@ export function NewIssueDialog() {
                     <>
                       <span
                         className="h-3.5 w-3.5 shrink-0 rounded-sm"
-                        style={{ backgroundColor: project?.color ?? "#6366f1" }}
+                        style={{ backgroundColor: project?.color ?? "var(--project-seed)" }}
                       />
                       <span className="truncate">{option.label}</span>
                     </>
@@ -1797,7 +1799,7 @@ export function NewIssueDialog() {
             <div className="px-4 py-3 space-y-2">
             <div className="space-y-1.5">
               <div className="text-xs font-medium">Execution workspace</div>
-              <div className="text-[11px] text-muted-foreground">
+              <div className="text-(length:--text-micro) text-muted-foreground">
                 Control whether this task runs in the shared workspace, a new isolated workspace, or an existing one.
               </div>
               <select
@@ -1827,12 +1829,12 @@ export function NewIssueDialog() {
                 />
               )}
               {executionWorkspaceMode === "reuse_existing" && selectedReusableExecutionWorkspace && (
-                <div className="text-[11px] text-muted-foreground">
+                <div className="text-(length:--text-micro) text-muted-foreground">
                   Reusing {selectedReusableExecutionWorkspace.name} from {selectedReusableExecutionWorkspace.branchName ?? selectedReusableExecutionWorkspace.cwd ?? "existing execution workspace"}.
                 </div>
               )}
               {showParentWorkspaceWarning ? (
-                <div className="rounded-md border border-amber-300/60 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-100">
+                <div className="rounded-md border border-amber-300/60 bg-amber-50 px-2 py-1.5 text-(length:--text-micro) text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-100">
                   Warning: this sub-task will no longer use the parent task workspace{parentExecutionWorkspaceLabel ? ` (${parentExecutionWorkspaceLabel})` : ""}.
                 </div>
               ) : null}
@@ -1879,7 +1881,7 @@ export function NewIssueDialog() {
                     ))}
                   </div>
                   {assigneeModelLane === "cheap" && (
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-(length:--text-micro) text-muted-foreground">
                       Sends <code>modelProfile: "cheap"</code>{" "}
                       {assigneeCheapProfile?.adapterConfig && typeof (assigneeCheapProfile.adapterConfig as Record<string, unknown>).model === "string"
                         ? <>· adapter default <code>{String((assigneeCheapProfile.adapterConfig as Record<string, unknown>).model)}</code></>
@@ -1889,10 +1891,10 @@ export function NewIssueDialog() {
                     </p>
                   )}
                   {assigneeModelLane === "primary" && (
-                    <p className="text-[11px] text-muted-foreground">Runs on the agent's primary model.</p>
+                    <p className="text-(length:--text-micro) text-muted-foreground">Runs on the agent's primary model.</p>
                   )}
                   {assigneeModelLane === "custom" && (
-                    <p className="text-[11px] text-muted-foreground">Override the model and effort for this task only.</p>
+                    <p className="text-(length:--text-micro) text-muted-foreground">Override the model and effort for this task only.</p>
                   )}
                 </div>
                 {assigneeModelLane === "custom" && (
@@ -1976,12 +1978,12 @@ export function NewIssueDialog() {
                       <div key={file.id} className="flex items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-2">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="rounded-full border border-border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                            <Badge variant="outline" className="border-border font-mono text-(length:--text-nano) uppercase tracking-(--tracking-eyebrow) text-muted-foreground">
                               {file.documentKey}
-                            </span>
+                            </Badge>
                             <span className="truncate text-sm">{file.file.name}</span>
                           </div>
-                          <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                          <div className="mt-1 flex items-center gap-2 text-(length:--text-micro) text-muted-foreground">
                             <FileText className="h-3.5 w-3.5" />
                             <span>{file.title || file.file.name}</span>
                             <span>•</span>
@@ -2015,7 +2017,7 @@ export function NewIssueDialog() {
                             <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                             <span className="truncate text-sm">{file.file.name}</span>
                           </div>
-                          <div className="mt-1 text-[11px] text-muted-foreground">
+                          <div className="mt-1 text-(length:--text-micro) text-muted-foreground">
                             {file.file.type || "application/octet-stream"} • {formatFileSize(file.file)}
                           </div>
                         </div>
@@ -2063,7 +2065,7 @@ export function NewIssueDialog() {
                   <span className="flex flex-col text-left leading-tight">
                     <span>{s.label}</span>
                     {s.description ? (
-                      <span className="text-[10px] text-muted-foreground">{s.description}</span>
+                      <span className="text-(length:--text-nano) text-muted-foreground">{s.description}</span>
                     ) : null}
                   </span>
                 </button>
@@ -2071,7 +2073,8 @@ export function NewIssueDialog() {
             </PopoverContent>
           </Popover>
 
-          {/* Priority chip */}
+          {/* Priority chip — PAP-411: hidden behind SHOW_TASK_PRIORITY_UI. */}
+          {SHOW_TASK_PRIORITY_UI && (
           <Popover open={priorityOpen} onOpenChange={setPriorityOpen}>
             <PopoverTrigger asChild>
               <button
@@ -2108,6 +2111,7 @@ export function NewIssueDialog() {
               ))}
             </PopoverContent>
           </Popover>
+          )}
 
           {/* Labels chip — disabled, not wired up yet */}
           {/* <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors text-muted-foreground">
@@ -2186,8 +2190,10 @@ export function NewIssueDialog() {
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-44 p-1" align="start" data-testid="new-issue-more-menu">
+              {/* PAP-411: mobile priority section hidden behind SHOW_TASK_PRIORITY_UI. */}
+              {SHOW_TASK_PRIORITY_UI && (
               <div className="sm:hidden">
-                <div className="px-2 py-1 text-[10px] font-medium uppercase text-muted-foreground">
+                <div className="px-2 py-1 text-(length:--text-nano) font-medium uppercase text-muted-foreground">
                   Priority
                 </div>
                 {priorities.map((p) => (
@@ -2210,6 +2216,7 @@ export function NewIssueDialog() {
                 ))}
                 <div className="my-1 border-t border-border" />
               </div>
+              )}
               <button className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-muted-foreground">
                 <Calendar className="h-3 w-3" />
                 Start date
@@ -2241,7 +2248,7 @@ export function NewIssueDialog() {
           >
             <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-300" />
             <span className="leading-snug">
-              Low-trust review agent. It can only act inside its assigned review boundary; issue, project, or run policy defines the concrete scope.
+              Low-trust review agent. It can only act inside its assigned review boundary; task, project, or run policy defines the concrete scope.
             </span>
           </div>
         ) : null}
@@ -2258,19 +2265,14 @@ export function NewIssueDialog() {
             Discard Draft
           </Button>
           <div className="flex items-center gap-3">
-            <div className="min-h-5 text-right">
-              {createIssue.isPending ? (
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Creating issue...
-                </span>
-              ) : createIssue.isError ? (
+            {createIssue.isError ? (
+              <div className="min-h-5 text-right">
                 <span className="text-xs text-destructive">{createIssueErrorMessage}</span>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
             <Button
               size="sm"
-              className="min-w-[8.5rem] disabled:opacity-100"
+              className="min-w-(--sz-8_5rem) disabled:opacity-100"
               disabled={!titleHasText || createIssue.isPending}
               onClick={handleSubmit}
               aria-busy={createIssue.isPending}
