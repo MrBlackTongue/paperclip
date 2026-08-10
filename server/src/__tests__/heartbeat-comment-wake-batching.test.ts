@@ -15,7 +15,20 @@ import {
 import { runningProcesses } from "../adapters/index.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY } from "../services/recovery/index.ts";
-import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.ts";
+import {
+  getEmbeddedPostgresTestSupport,
+  startEmbeddedPostgresTestDatabase,
+} from "./helpers/embedded-postgres.ts";
+import { parseWakePayloadFromMessage } from "./helpers/wake-message.ts";
+
+const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
+
+if (!embeddedPostgresSupport.supported) {
+  console.warn(
+    `Skipping embedded Postgres heartbeat comment wake batching tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+  );
+}
 
 async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 10_000, intervalMs = 50) {
   const startedAt = Date.now();
@@ -147,7 +160,7 @@ async function createControlledGatewayServer() {
   };
 }
 
-describe("heartbeat comment wake batching", () => {
+describeEmbeddedPostgres("heartbeat comment wake batching", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
@@ -179,6 +192,7 @@ describe("heartbeat comment wake batching", () => {
       name: "Paperclip",
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
     });
 
     await db.insert(agents).values({
@@ -218,6 +232,7 @@ describe("heartbeat comment wake batching", () => {
       title: "Hire an agent",
       status: "blocked",
       priority: "medium",
+      responsibleUserId: "responsible-user",
       assigneeAgentId: agentId,
       executionRunId: runId,
       executionAgentNameKey: "ceo",
@@ -280,6 +295,125 @@ describe("heartbeat comment wake batching", () => {
     expect(runs[0]?.id).toBe(runId);
   });
 
+  it("defers recovery hand-back wakes until the resolving run exits", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const recoveryActionId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const heartbeat = heartbeatService(db);
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Recovery owner",
+      role: "engineer",
+      status: "running",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "running",
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        wakeReason: "source_scoped_recovery_action",
+      },
+    });
+    runningProcesses.set(runId, {
+      child: {} as never,
+      graceSec: 0,
+      processGroupId: null,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Resume handed-back work",
+      status: "todo",
+      priority: "medium",
+      responsibleUserId: "responsible-user",
+      assigneeAgentId: agentId,
+      executionRunId: runId,
+      executionAgentNameKey: "recovery owner",
+      executionLockedAt: new Date(),
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+    });
+
+    const followupRun = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_recovery_action_restored",
+      payload: {
+        issueId,
+        recoveryActionId,
+        mutation: "recovery_action_resolution",
+      },
+      contextSnapshot: {
+        issueId,
+        taskId: issueId,
+        recoveryActionId,
+        wakeReason: "issue_recovery_action_restored",
+        source: "issue.recovery_action_resolution",
+      },
+      requestedByActorType: "agent",
+      requestedByActorId: agentId,
+    });
+
+    expect(followupRun).toBeNull();
+
+    const deferred = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+
+    expect(deferred).toMatchObject({
+      reason: "issue_execution_deferred",
+      runId: null,
+      payload: expect.objectContaining({
+        issueId,
+        recoveryActionId,
+        mutation: "recovery_action_resolution",
+      }),
+    });
+    expect((deferred?.payload as Record<string, unknown>)._paperclipWakeContext).toMatchObject({
+      issueId,
+      taskId: issueId,
+      recoveryActionId,
+      wakeReason: "issue_recovery_action_restored",
+      source: "issue.recovery_action_resolution",
+    });
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
+  });
+
   it("batches deferred comment wakes and forwards the ordered batch to the next run", async () => {
     const gateway = await createControlledGatewayServer();
     const companyId = randomUUID();
@@ -294,6 +428,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -323,6 +458,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Batch wake comments",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -464,11 +600,11 @@ describe("heartbeat comment wake batching", () => {
         return statusesByRunId.get(firstRun!.id) === "succeeded" && statusesByRunId.get(secondRunId) === "succeeded";
       }, 90_000);
 
-      expect(secondPayload.paperclip).toMatchObject({
-        wake: {
-          commentIds: [comment2.id, comment3.id],
-          latestCommentId: comment3.id,
-        },
+      expect(secondPayload.paperclip).toBeUndefined();
+      const secondWake = parseWakePayloadFromMessage(secondPayload.message);
+      expect(secondWake).toMatchObject({
+        commentIds: [comment2.id, comment3.id],
+        latestCommentId: comment3.id,
       });
       expect(String(secondPayload.message ?? "")).toContain("Second comment");
       expect(String(secondPayload.message ?? "")).toContain("Third comment");
@@ -493,6 +629,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -522,6 +659,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Interrupt queued comment",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 2,
         identifier: `${issuePrefix}-2`,
@@ -603,30 +741,14 @@ describe("heartbeat comment wake batching", () => {
 
       await waitFor(() => gateway.getAgentPayloads().length === 2);
       const promotedPayload = gateway.getAgentPayloads()[1] ?? {};
-      expect(promotedPayload.paperclip).toMatchObject({
-        wake: {
-          commentIds: [queuedComment.id],
-          latestCommentId: queuedComment.id,
-          comments: [
-            expect.objectContaining({
-              id: queuedComment.id,
-              authorType: "user",
-              body: "Queued follow-up",
-              presentation: expect.objectContaining({
-                kind: "system_notice",
-                tone: "warning",
-              }),
-              metadata: expect.objectContaining({
-                version: 1,
-              }),
-            }),
-          ],
-          commentWindow: {
-            requestedCount: 1,
-            includedCount: 1,
-            missingCount: 0,
-          },
-        },
+      expect(promotedPayload.paperclip).toBeUndefined();
+      const promotedWake = parseWakePayloadFromMessage(promotedPayload.message);
+      expect(promotedWake).toMatchObject({
+        commentIds: [queuedComment.id],
+        latestCommentId: queuedComment.id,
+        requestedCount: 1,
+        includedCount: 1,
+        missingCount: 0,
       });
       expect(String(promotedPayload.message ?? "")).toContain("Queued follow-up");
 
@@ -655,6 +777,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -684,6 +807,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Reopen after deferred comment",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -812,18 +936,18 @@ describe("heartbeat comment wake batching", () => {
       });
 
       const secondPayload = gateway.getAgentPayloads()[1] ?? {};
-      expect(secondPayload.paperclip).toMatchObject({
-        wake: {
-          reason: "issue_commented",
-          commentIds: [comment2.id],
-          latestCommentId: comment2.id,
-          issue: {
-            id: issueId,
-            identifier: `${issuePrefix}-1`,
-            title: "Reopen after deferred comment",
-            status: "in_progress",
-            priority: "medium",
-          },
+      expect(secondPayload.paperclip).toBeUndefined();
+      const secondWake = parseWakePayloadFromMessage(secondPayload.message);
+      expect(secondWake).toMatchObject({
+        reason: "issue_commented",
+        commentIds: [comment2.id],
+        latestCommentId: comment2.id,
+        issue: {
+          id: issueId,
+          identifier: `${issuePrefix}-1`,
+          title: "Reopen after deferred comment",
+          status: "in_progress",
+          priority: "medium",
         },
       });
       expect(String(secondPayload.message ?? "")).toContain("Please handle this follow-up after you finish");
@@ -848,6 +972,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values([
@@ -899,6 +1024,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Do not reopen from agent mention",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -1012,18 +1138,18 @@ describe("heartbeat comment wake batching", () => {
       expect(issueAfterPromotion?.completedAt).not.toBeNull();
 
       const secondPayload = gateway.getAgentPayloads()[1] ?? {};
-      expect(secondPayload.paperclip).toMatchObject({
-        wake: {
-          reason: "issue_comment_mentioned",
-          commentIds: [comment.id],
-          latestCommentId: comment.id,
-          issue: {
-            id: issueId,
-            identifier: `${issuePrefix}-1`,
-            title: "Do not reopen from agent mention",
-            status: "done",
-            priority: "medium",
-          },
+      expect(secondPayload.paperclip).toBeUndefined();
+      const secondWake = parseWakePayloadFromMessage(secondPayload.message);
+      expect(secondWake).toMatchObject({
+        reason: "issue_comment_mentioned",
+        commentIds: [comment.id],
+        latestCommentId: comment.id,
+        issue: {
+          id: issueId,
+          identifier: `${issuePrefix}-1`,
+          title: "Do not reopen from agent mention",
+          status: "done",
+          priority: "medium",
         },
       });
       expect(String(secondPayload.message ?? "")).toContain("please review after I finish");
@@ -1047,6 +1173,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -1076,6 +1203,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Self-comment must not reopen",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -1213,6 +1341,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -1242,6 +1371,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Human follow-up must survive mixed deferred batches",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -1389,18 +1519,18 @@ describe("heartbeat comment wake batching", () => {
       });
 
       const secondPayload = gateway.getAgentPayloads()[1] ?? {};
-      expect(secondPayload.paperclip).toMatchObject({
-        wake: {
-          reason: "issue_commented",
-          commentIds: [selfComment.id, humanComment.id],
-          latestCommentId: humanComment.id,
-          issue: {
-            id: issueId,
-            identifier: `${issuePrefix}-1`,
-            title: "Human follow-up must survive mixed deferred batches",
-            status: "in_progress",
-            priority: "medium",
-          },
+      expect(secondPayload.paperclip).toBeUndefined();
+      const secondWake = parseWakePayloadFromMessage(secondPayload.message);
+      expect(secondWake).toMatchObject({
+        reason: "issue_commented",
+        commentIds: [selfComment.id, humanComment.id],
+        latestCommentId: humanComment.id,
+        issue: {
+          id: issueId,
+          identifier: `${issuePrefix}-1`,
+          title: "Human follow-up must survive mixed deferred batches",
+          status: "in_progress",
+          priority: "medium",
         },
       });
       expect(String(secondPayload.message ?? "")).toContain("Real follow-up from a human after the run closes");
@@ -1424,6 +1554,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -1453,6 +1584,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Require a comment",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -1475,20 +1607,7 @@ describe("heartbeat comment wake batching", () => {
       expect(firstRun).not.toBeNull();
       await waitFor(() => gateway.getAgentPayloads().length === 1);
       const firstPayload = gateway.getAgentPayloads()[0] ?? {};
-      expect(firstPayload.paperclip).toMatchObject({
-        wake: {
-          reason: "issue_assigned",
-          issue: {
-            id: issueId,
-            identifier: `${issuePrefix}-1`,
-            title: "Require a comment",
-            status: "in_progress",
-            priority: "medium",
-          },
-          checkedOutByHarness: true,
-          commentIds: [],
-        },
-      });
+      expect(firstPayload.paperclip).toBeUndefined();
       expect(String(firstPayload.message ?? "")).toContain("## Paperclip Wake Payload");
       expect(String(firstPayload.message ?? "")).toContain("Do not switch to another issue until you have handled this wake.");
       expect(String(firstPayload.message ?? "")).toContain("- checkout: already claimed by the harness for this run");
@@ -1496,6 +1615,16 @@ describe("heartbeat comment wake batching", () => {
         "The harness already checked out this issue for the current run.",
       );
       expect(String(firstPayload.message ?? "")).toContain(`${issuePrefix}-1 Require a comment`);
+      const firstWake = parseWakePayloadFromMessage(firstPayload.message);
+      expect(firstWake).toMatchObject({
+        reason: "issue_assigned",
+        checkedOutByHarness: true,
+        commentIds: [],
+        issue: {
+          id: issueId,
+          identifier: `${issuePrefix}-1`,
+        },
+      });
       const checkedOutIssue = await db
         .select({
           status: issues.status,
@@ -1577,6 +1706,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values([
@@ -1628,6 +1758,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Prevent concurrent mention execution",
         status: "todo",
         priority: "high",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: primaryAgentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -1778,6 +1909,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values([
@@ -1829,6 +1961,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Mention should not steal execution ownership",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: primaryAgentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,
@@ -1925,6 +2058,7 @@ describe("heartbeat comment wake batching", () => {
         name: "Paperclip",
         issuePrefix,
         requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
       });
 
       await db.insert(agents).values({
@@ -1954,6 +2088,7 @@ describe("heartbeat comment wake batching", () => {
         title: "Use existing comment",
         status: "todo",
         priority: "medium",
+        responsibleUserId: "responsible-user",
         assigneeAgentId: agentId,
         issueNumber: 1,
         identifier: `${issuePrefix}-1`,

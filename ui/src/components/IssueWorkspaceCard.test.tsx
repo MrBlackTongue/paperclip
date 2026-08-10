@@ -49,6 +49,7 @@ function createExecutionWorkspace(overrides: Partial<ExecutionWorkspace> = {}): 
     strategyType: "git_worktree",
     name: "Issue sandbox",
     status: "active",
+    deliveryState: "unknown",
     cwd: "/tmp/issue-sandbox",
     repoUrl: null,
     baseRef: null,
@@ -90,8 +91,10 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     description: null,
     status: "in_progress",
     priority: "medium",
+    reviewPolicy: null,
     assigneeAgentId: "agent-1",
     assigneeUserId: null,
+    responsibleUserId: null,
     createdByAgentId: null,
     createdByUserId: null,
     issueNumber: 81,
@@ -124,14 +127,22 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
 
 describe("IssueWorkspaceCard", () => {
   let container: HTMLDivElement;
+  let originalResizeObserver: typeof ResizeObserver | undefined;
 
   beforeEach(() => {
+    originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
     container = document.createElement("div");
     document.body.appendChild(container);
     useQueryMock.mockReset();
   });
 
   afterEach(() => {
+    globalThis.ResizeObserver = originalResizeObserver!;
     container.remove();
   });
 
@@ -180,7 +191,8 @@ describe("IssueWorkspaceCard", () => {
     });
 
     const selects = container.querySelectorAll("select");
-    expect(selects).toHaveLength(2);
+    expect(selects).toHaveLength(1);
+    expect(container.querySelector("button[role='combobox']")?.textContent).toContain("Issue sandbox");
 
     const saveButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Save"));
     expect(saveButton).not.toBeUndefined();
@@ -243,7 +255,8 @@ describe("IssueWorkspaceCard", () => {
     });
 
     const selects = container.querySelectorAll("select");
-    expect(selects).toHaveLength(2);
+    expect(selects).toHaveLength(1);
+    expect(container.querySelector("button[role='combobox']")?.textContent).toContain("Issue sandbox");
     expect(container.textContent).not.toContain("Project default environment");
 
     act(() => {

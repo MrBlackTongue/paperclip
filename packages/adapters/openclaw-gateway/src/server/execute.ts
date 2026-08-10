@@ -86,7 +86,7 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -337,7 +337,7 @@ function resolvePaperclipApiUrlOverride(value: unknown): string | null {
 
 const DEFAULT_CLAIMED_API_KEY_PATH = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
 
-function resolveClaimedApiKeyPath(value: unknown): string {
+export function resolveClaimedApiKeyPath(value: unknown): string {
   return nonEmpty(value) ?? DEFAULT_CLAIMED_API_KEY_PATH;
 }
 
@@ -369,8 +369,8 @@ function buildWakeText(
   payload: WakePayload,
   paperclipEnv: Record<string, string>,
   structuredWakePrompt: string,
+  claimedApiKeyPath: string,
 ): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
   const orderedKeys = [
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_AGENT_ID",
@@ -470,60 +470,32 @@ function joinWakePayloadSections(structuredWakePrompt: string, structuredWakeJso
   return sections.join("\n");
 }
 
-function buildStandardPaperclipPayload(
-  ctx: AdapterExecutionContext,
-  wakePayload: WakePayload,
-  paperclipEnv: Record<string, string>,
-  payloadTemplate: Record<string, unknown>,
-): Record<string, unknown> {
-  const templatePaperclip = parseObject(payloadTemplate.paperclip);
-  const workspace = asRecord(ctx.context.paperclipWorkspace);
-  const workspaces = Array.isArray(ctx.context.paperclipWorkspaces)
-    ? ctx.context.paperclipWorkspaces.filter((entry): entry is Record<string, unknown> => Boolean(asRecord(entry)))
-    : [];
-  const configuredWorkspaceRuntime = parseObject(ctx.config.workspaceRuntime);
-  const runtimeServiceIntents = Array.isArray(ctx.context.paperclipRuntimeServiceIntents)
-    ? ctx.context.paperclipRuntimeServiceIntents.filter(
-        (entry): entry is Record<string, unknown> => Boolean(asRecord(entry)),
-      )
-    : [];
-
-  const standardPaperclip: Record<string, unknown> = {
-    runId: ctx.runId,
-    companyId: ctx.agent.companyId,
-    agentId: ctx.agent.id,
-    agentName: ctx.agent.name,
-    taskId: wakePayload.taskId,
-    issueId: wakePayload.issueId,
-    issueIds: wakePayload.issueIds,
-    wakeReason: wakePayload.wakeReason,
-    wakeCommentId: wakePayload.wakeCommentId,
-    approvalId: wakePayload.approvalId,
-    approvalStatus: wakePayload.approvalStatus,
-    apiUrl: paperclipEnv.PAPERCLIP_API_URL ?? null,
+export function buildAgentParams(input: {
+  payloadTemplate: Record<string, unknown>;
+  message: string;
+  sessionKey: string;
+  runId: string;
+  configuredAgentId: string | null;
+  waitTimeoutMs: number;
+}): Record<string, unknown> {
+  const agentParams: Record<string, unknown> = {
+    ...input.payloadTemplate,
+    message: input.message,
+    sessionKey: input.sessionKey,
+    idempotencyKey: input.runId,
   };
-  const structuredWake = parseObject(ctx.context.paperclipWake);
-  if (Object.keys(structuredWake).length > 0) {
-    standardPaperclip.wake = structuredWake;
+  delete agentParams.text;
+  delete agentParams.paperclip;
+
+  if (input.configuredAgentId && !nonEmpty(agentParams.agentId)) {
+    agentParams.agentId = input.configuredAgentId;
   }
 
-  if (workspace) {
-    standardPaperclip.workspace = workspace;
-  }
-  if (workspaces.length > 0) {
-    standardPaperclip.workspaces = workspaces;
-  }
-  if (runtimeServiceIntents.length > 0 || Object.keys(configuredWorkspaceRuntime).length > 0) {
-    standardPaperclip.workspaceRuntime = {
-      ...configuredWorkspaceRuntime,
-      ...(runtimeServiceIntents.length > 0 ? { services: runtimeServiceIntents } : {}),
-    };
+  if (typeof agentParams.timeout !== "number") {
+    agentParams.timeout = input.waitTimeoutMs;
   }
 
-  return {
-    ...templatePaperclip,
-    ...standardPaperclip,
-  };
+  return agentParams;
 }
 
 function normalizeUrl(input: string): URL | null {
@@ -1112,7 +1084,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const wakePayload = buildWakePayload(ctx);
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
-  const structuredWakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake);
+  // No heartbeat prompt template is sent over the gateway, so the wake prompt
+  // must carry the execution contract itself.
+  const structuredWakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake, {
+    includeExecutionContract: true,
+  });
   const structuredWakeJson = stringifyPaperclipWakePayload(ctx.context.paperclipWake);
   const wakeText = buildWakeText(
     wakePayload,
@@ -1120,6 +1096,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     structuredWakeJson
       ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
       : structuredWakePrompt,
+    resolveClaimedApiKeyPath(ctx.config.claimedApiKeyPath),
   );
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -1135,24 +1112,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
   const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
-  const paperclipPayload = buildStandardPaperclipPayload(ctx, wakePayload, paperclipEnv, payloadTemplate);
 
-  const agentParams: Record<string, unknown> = {
-    ...payloadTemplate,
+  const agentParams = buildAgentParams({
+    payloadTemplate,
     message,
     sessionKey,
-    idempotencyKey: ctx.runId,
-  };
-  delete agentParams.text;
-  agentParams.paperclip = paperclipPayload;
-
-  if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
-    agentParams.agentId = configuredAgentId;
-  }
-
-  if (typeof agentParams.timeout !== "number") {
-    agentParams.timeout = waitTimeoutMs;
-  }
+    runId: ctx.runId,
+    configuredAgentId,
+    waitTimeoutMs,
+  });
 
   if (ctx.onMeta) {
     await ctx.onMeta({
