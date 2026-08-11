@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, lt } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import type { ExecutionWorkspace, ExecutionWorkspaceCloseReadiness } from "@paperclipai/shared";
@@ -16,6 +16,15 @@ import {
 } from "./workspace-runtime.js";
 
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
+
+/**
+ * Две работы по одной задаче могут идти внахлёст: каждая заводит свою shared-запись
+ * и потом закрывает «все, кроме своей». Без защиты они закрывают записи друг друга —
+ * живому прогону при этом гасят service-ы рабочей сессии. Запись, к которой недавно
+ * обращались, считаем возможно живой и не трогаем; она закроется следующим проходом,
+ * когда действительно перестанет использоваться.
+ */
+const SUPERSEDED_SHARED_SESSION_GRACE_MS = 15 * 60_000;
 
 type CleanupActor = Pick<LogActivityInput, "actorType" | "actorId" | "agentId" | "runId">;
 
@@ -200,9 +209,14 @@ async function archiveSupersededSharedSessions(
     sourceIssueId: string;
     keepWorkspaceId: string | null;
     actor: CleanupActor;
+    /** Закрывать записи независимо от возраста: задача терминальная, живых прогонов по ней нет. */
+    ignoreGrace?: boolean;
+    now?: Date;
   },
 ): Promise<string[]> {
   const svc = executionWorkspaceService(db);
+  const now = input.now ?? new Date();
+  const staleBefore = new Date(now.getTime() - SUPERSEDED_SHARED_SESSION_GRACE_MS);
   const rows = await db
     .select({ id: executionWorkspaces.id })
     .from(executionWorkspaces)
@@ -212,6 +226,7 @@ async function archiveSupersededSharedSessions(
         eq(executionWorkspaces.sourceIssueId, input.sourceIssueId),
         eq(executionWorkspaces.mode, "shared_workspace"),
         inArray(executionWorkspaces.status, ["active", "idle", "in_review"]),
+        ...(input.ignoreGrace ? [] : [lt(executionWorkspaces.lastUsedAt, staleBefore)]),
       ),
     );
   const archivedIds: string[] = [];
@@ -260,6 +275,7 @@ export function executionWorkspaceLifecycleService(db: Db) {
         sourceIssueId: input.issueId,
         keepWorkspaceId: issue.executionWorkspaceId,
         actor: input.actor,
+        ignoreGrace: true,
       });
     }
     if (!issue.executionWorkspaceId) {
@@ -327,19 +343,22 @@ export function executionWorkspaceLifecycleService(db: Db) {
 
   /**
    * Вызывается при заведении новой shared-сессии: закрывает записи прежних прогонов
-   * по этой же задаче, оставляя открытой только текущую.
+   * по этой же задаче, оставляя открытой текущую и всё, к чему обращались недавно —
+   * иначе прогоны внахлёст закрывают записи друг друга.
    */
   async function archiveSupersededSharedSessionsForIssue(input: {
     companyId: string;
     issueId: string;
     keepWorkspaceId: string;
     actor: CleanupActor;
+    now?: Date;
   }): Promise<string[]> {
     return archiveSupersededSharedSessions(db, {
       companyId: input.companyId,
       sourceIssueId: input.issueId,
       keepWorkspaceId: input.keepWorkspaceId,
       actor: input.actor,
+      now: input.now,
     });
   }
 

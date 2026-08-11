@@ -157,6 +157,7 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
   async function insertPriorSharedSession(
     fixture: { companyId: string; projectId: string; projectWorkspaceId: string; worktreePath: string },
     sourceIssueId: string,
+    options?: { lastUsedAt?: Date },
   ) {
     const id = randomUUID();
     await db.insert(executionWorkspaces).values({
@@ -174,6 +175,8 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       providerRef: null,
       baseRef: "main",
       metadata: { createdByRuntime: false },
+      // Записи прежних прогонов по умолчанию состарены: свежие защищены грейс-окном.
+      lastUsedAt: options?.lastUsedAt ?? new Date(Date.now() - 60 * 60_000),
     });
     return id;
   }
@@ -316,6 +319,27 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       .where(eq(issues.id, fixture.issueIds[0]))
       .then((rows) => rows[0]);
     expect(issue.executionWorkspaceId).toBe(fixture.executionWorkspaceId);
+  }, 20_000);
+
+  it("keeps a concurrently opened shared session that another live run still owns", async () => {
+    const fixture = await createFixture(["in_review"], "shared_workspace");
+    const stalePrior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
+    // Прогон внахлёст: его запись заведена только что, закрывать её нельзя.
+    const concurrent = await insertPriorSharedSession(fixture, fixture.issueIds[0], {
+      lastUsedAt: new Date(),
+    });
+
+    const archived = await lifecycle.archiveSupersededSharedSessionsForIssue({
+      companyId: fixture.companyId,
+      issueId: fixture.issueIds[0],
+      keepWorkspaceId: fixture.executionWorkspaceId,
+      actor,
+    });
+
+    expect(archived).toEqual([stalePrior]);
+    expect(await statusOf(stalePrior)).toBe("archived");
+    expect(await statusOf(concurrent)).toBe("active");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
   }, 20_000);
 
   it("archives shared sessions of previous runs when the issue reaches a terminal status", async () => {
