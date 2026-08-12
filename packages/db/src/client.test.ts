@@ -1416,7 +1416,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
       const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
       try {
         const fixRoutineExecutionIndexHash = await migrationHash(
-          "0213_fix_routine_execution_index.sql",
+          "0214_fix_routine_execution_index.sql",
         );
 
         await sql.unsafe(
@@ -1447,7 +1447,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
       const pendingState = await inspectMigrations(connectionString);
       expect(pendingState).toMatchObject({
         status: "needsMigrations",
-        pendingMigrations: ["0213_fix_routine_execution_index.sql"],
+        pendingMigrations: ["0214_fix_routine_execution_index.sql"],
         reason: "pending-migrations",
       });
 
