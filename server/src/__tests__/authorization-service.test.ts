@@ -1777,6 +1777,73 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
+  it("does not grant user participation access across sibling branches of the same parent", async () => {
+    const company = await createCompany(db, "UserParticipationSiblings");
+    const qaUserId = `user-${randomUUID()}`;
+    const boardUserId = `board-${randomUUID()}`;
+    await db.insert(companyMemberships).values({
+      companyId: company.id,
+      principalType: "user",
+      principalId: boardUserId,
+      status: "active",
+      membershipRole: "member",
+    });
+    const parentIssue = await createIssue(db, company.id, {
+      title: "Parent chain",
+      status: "in_progress",
+    });
+    const mentionedSibling = await createIssue(db, company.id, {
+      title: "Sibling that mentions the user",
+      parentId: parentIssue.id,
+      status: "in_progress",
+    });
+    const otherSibling = await createIssue(db, company.id, {
+      title: "Unrelated sibling",
+      parentId: parentIssue.id,
+      status: "in_progress",
+    });
+    await db.insert(issueComments).values({
+      companyId: company.id,
+      issueId: mentionedSibling.id,
+      authorUserId: boardUserId,
+      authorType: "user",
+      body: `[@Anna](user://${qaUserId}) please look at this branch.`,
+    });
+
+    const authorization = authorizationService(db);
+    const actor = { type: "board", userId: qaUserId, companyIds: [], source: "session" } as const;
+
+    await expect(authorization.decide({
+      actor,
+      action: "issue:comment",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: mentionedSibling.id,
+        parentIssueId: parentIssue.id,
+        status: mentionedSibling.status,
+      },
+    })).resolves.toMatchObject({
+      allowed: true,
+      reason: "allow_issue_user_participation_grant",
+    });
+
+    await expect(authorization.decide({
+      actor,
+      action: "issue:comment",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: otherSibling.id,
+        parentIssueId: parentIssue.id,
+        status: otherSibling.status,
+      },
+    })).resolves.toMatchObject({
+      allowed: false,
+      reason: "deny_missing_membership",
+    });
+  });
+
   it("limits viewer members to read-only visibility actions", async () => {
     const company = await createCompany(db, "BoardViewerVisibility");
     const userId = `user-${randomUUID()}`;

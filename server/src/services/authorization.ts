@@ -1384,6 +1384,9 @@ export function authorizationService(db: Db) {
     return false;
   }
 
+  // Цепочка задачи — её предки и её собственное поддерево. Поддеревья предков
+  // (соседние ветки) в цепочку не входят: упоминание в соседней ветке не должно
+  // давать доступ к этой задаче.
   async function issueChainIds(companyId: string, issueId: string) {
     const rows = await db.execute(sql`
       WITH RECURSIVE ancestors(id, parent_id, depth) AS (
@@ -1398,18 +1401,21 @@ export function authorizationService(db: Db) {
         WHERE parent.company_id = ${companyId}
           AND ancestors.depth < ${LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH - 1}
       ),
-      tree(id, depth) AS (
+      descendants(id, depth) AS (
         SELECT id, 0
-        FROM ancestors
+        FROM issues
+        WHERE company_id = ${companyId}
+          AND id = ${issueId}
         UNION ALL
-        SELECT child.id, tree.depth + 1
+        SELECT child.id, descendants.depth + 1
         FROM issues child
-        JOIN tree ON child.parent_id = tree.id
+        JOIN descendants ON child.parent_id = descendants.id
         WHERE child.company_id = ${companyId}
-          AND tree.depth < ${LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH - 1}
+          AND descendants.depth < ${LOW_TRUST_ISSUE_ANCESTRY_MAX_DEPTH - 1}
       )
-      SELECT DISTINCT id
-      FROM tree
+      SELECT id FROM ancestors
+      UNION
+      SELECT id FROM descendants
     `);
     return (Array.isArray(rows) ? rows : [])
       .map((row) => typeof row === "object" && row ? (row as Record<string, unknown>).id : null)

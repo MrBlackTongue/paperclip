@@ -154,7 +154,13 @@ import { logger } from "../middleware/logger.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { privateJsonEtag } from "../middleware/private-json-etag.js";
 import { createRequestPromiseMemo } from "../lib/request-promise-memo.js";
-import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
+import {
+  assertBoard,
+  assertCompanyAccess,
+  getAccessibleResource,
+  getActorInfo,
+  hasCompanyAccess,
+} from "./authz.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
   collectIssueWorkspaceCommandPaths,
@@ -3820,6 +3826,28 @@ export function issueRoutes(
     const decision = await decideIssueAccess(req, issue, "issue:mutate");
     if (decision.allowed) return true;
     return denyIssueWrite(req, res, issue, issueWriteDenialCodeForDecision(decision));
+  }
+
+  // Загрузка задачи для записи комментария. Участнику компании — как раньше.
+  // Пользователю без членства доступ может давать грант участия в цепочке задачи,
+  // поэтому мембершип здесь не единственный ключ; отказ по-прежнему отвечает 404,
+  // чтобы не подтверждать существование чужой задачи.
+  async function getCommentableIssue(req: Request, res: Response, id: string) {
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return null;
+    }
+    if (hasCompanyAccess(req, issue.companyId)) {
+      assertCompanyAccess(req, issue.companyId);
+      return issue;
+    }
+    if (req.actor.type !== "agent") {
+      const decision = await decideIssueAccess(req, issue, "issue:comment");
+      if (decision.allowed) return issue;
+    }
+    res.status(404).json({ error: "Issue not found" });
+    return null;
   }
 
   async function assertIssueCommentAllowed(
@@ -11088,7 +11116,7 @@ export function issueRoutes(
 
   router.post("/issues/:id/comments", validate(addIssueCommentSchema), async (req, res) => {
     const id = req.params.id as string;
-    const issue = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
+    const issue = await getCommentableIssue(req, res, id);
     if (!issue) return;
     if (req.actor.type === "agent" && req.body.onBehalfOfUserId != null) {
       await auditAgentIssueCommentAttributionSpoof({
