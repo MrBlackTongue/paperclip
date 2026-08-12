@@ -13813,8 +13813,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         cleanupReason: null,
       });
     }
-    // Прогон завёл новую shared-сессию: записи прежних прогонов по этой же задаче
-    // закрываем сразу, иначе они копятся по одной на прогон и никогда не закрываются.
+    // This run created a new shared session: archive the sessions of earlier runs on the
+    // same issue right away, otherwise they pile up one per run and are never closed.
     if (issueId && persistedExecutionWorkspace?.mode === "shared_workspace") {
       try {
         await executionWorkspaceLifecycle.archiveSupersededSharedSessionsForIssue({

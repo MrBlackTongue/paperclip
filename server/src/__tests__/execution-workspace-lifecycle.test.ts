@@ -153,7 +153,7 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     return { companyId, projectId, projectWorkspaceId, executionWorkspaceId, issueIds, worktreePath };
   }
 
-  /** Запись shared-сессии прежнего прогона: та же задача, свой id, ссылки из задачи на неё нет. */
+  /** A shared session from an earlier run: same issue, own id, not referenced by the issue. */
   async function insertPriorSharedSession(
     fixture: { companyId: string; projectId: string; projectWorkspaceId: string; worktreePath: string },
     sourceIssueId: string,
@@ -175,7 +175,7 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       providerRef: null,
       baseRef: "main",
       metadata: { createdByRuntime: false },
-      // Записи прежних прогонов по умолчанию состарены: свежие защищены грейс-окном.
+      // Sessions of earlier runs are aged by default: fresh ones are held by the grace window.
       lastUsedAt: options?.lastUsedAt ?? new Date(Date.now() - 60 * 60_000),
     });
     return id;
@@ -324,7 +324,7 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
   it("keeps a concurrently opened shared session that another live run still owns", async () => {
     const fixture = await createFixture(["in_review"], "shared_workspace");
     const stalePrior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
-    // Прогон внахлёст: его запись заведена только что, закрывать её нельзя.
+    // Overlapping run: its session was just created, so it must not be archived.
     const concurrent = await insertPriorSharedSession(fixture, fixture.issueIds[0], {
       lastUsedAt: new Date(),
     });

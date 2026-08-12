@@ -18,11 +18,11 @@ import {
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 
 /**
- * Две работы по одной задаче могут идти внахлёст: каждая заводит свою shared-запись
- * и потом закрывает «все, кроме своей». Без защиты они закрывают записи друг друга —
- * живому прогону при этом гасят service-ы рабочей сессии. Запись, к которой недавно
- * обращались, считаем возможно живой и не трогаем; она закроется следующим проходом,
- * когда действительно перестанет использоваться.
+ * Two runs on the same issue can overlap: each creates its own shared session and then
+ * archives "everything but mine". Without a guard they archive each other's sessions and
+ * stop the workspace-scoped runtime services of a live run. A session that was used
+ * recently is therefore treated as possibly live and left alone; the next pass archives
+ * it once it really stops being used.
  */
 const SUPERSEDED_SHARED_SESSION_GRACE_MS = 15 * 60_000;
 
@@ -195,12 +195,12 @@ async function archiveExecutionWorkspace(
 }
 
 /**
- * Каждый прогон по задаче заводит собственную запись shared_workspace, а закрывалась
- * до сих пор только та, на которую смотрит issues.execution_workspace_id. Записи
- * прежних прогонов оставались открытыми навсегда: на 252 задачи приходилось 870
- * незакрытых записей, до 45 на одну задачу. Shared-сессия не владеет каталогом на
- * диске (см. ранний возврат в cleanupExecutionWorkspaceArtifacts), поэтому закрытие
- * вытесненной записи — это закрытие только записи.
+ * Every run on an issue creates its own shared_workspace session, but only the one
+ * issues.execution_workspace_id points at was ever archived. Sessions from earlier runs
+ * stayed open forever: 870 open sessions across 252 issues in one measurement, up to 45
+ * on a single issue. A shared session owns no directory on disk (see the early return in
+ * cleanupExecutionWorkspaceArtifacts), so archiving a superseded one archives the record
+ * and nothing else.
  */
 async function archiveSupersededSharedSessions(
   db: Db,
@@ -209,7 +209,7 @@ async function archiveSupersededSharedSessions(
     sourceIssueId: string;
     keepWorkspaceId: string | null;
     actor: CleanupActor;
-    /** Закрывать записи независимо от возраста: задача терминальная, живых прогонов по ней нет. */
+    /** Archive regardless of age: the issue is terminal, so it has no live runs left. */
     ignoreGrace?: boolean;
     now?: Date;
   },
@@ -267,8 +267,8 @@ export function executionWorkspaceLifecycleService(db: Db) {
     if (!issue || !TERMINAL_ISSUE_STATUSES.has(issue.status)) {
       return { outcome: "not_applicable", workspace: null };
     }
-    // Задача терминальная — записи прежних прогонов по ней больше никому не нужны,
-    // независимо от того, на какую из них смотрит issues.execution_workspace_id.
+    // The issue is terminal, so sessions from earlier runs are of no use to anyone,
+    // whichever one issues.execution_workspace_id happens to point at.
     if (!input.defer) {
       await archiveSupersededSharedSessions(db, {
         companyId: issue.companyId,
@@ -342,9 +342,9 @@ export function executionWorkspaceLifecycleService(db: Db) {
   }
 
   /**
-   * Вызывается при заведении новой shared-сессии: закрывает записи прежних прогонов
-   * по этой же задаче, оставляя открытой текущую и всё, к чему обращались недавно —
-   * иначе прогоны внахлёст закрывают записи друг друга.
+   * Called when a new shared session is created: archives the sessions of earlier runs on
+   * the same issue, keeping the current one and anything used recently — otherwise
+   * overlapping runs archive each other's sessions.
    */
   async function archiveSupersededSharedSessionsForIssue(input: {
     companyId: string;
