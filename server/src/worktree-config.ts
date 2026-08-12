@@ -348,7 +348,46 @@ function resolveWorktreeRuntimeContext(
  * push worktree paths, ports or `PAPERCLIP_*` env entries into it.
  */
 export function isWorktreeRepairWriteAllowed(worktreeRoot: string, targetPath: string): boolean {
-  return isPathInside(targetPath, worktreeRoot) && isLinkedGitWorktreeCheckout(worktreeRoot);
+  if (!isPathInside(targetPath, worktreeRoot)) return false;
+  // Lexical containment alone is not the boundary the doc comment promises: a
+  // symlinked `.paperclip`, `config.json` or `.env` stays lexically under the
+  // checkout while the write follows the link and lands outside it. Compare the
+  // resolved destination too, so a symlink cannot be used to overwrite external
+  // configuration through worktree repair.
+  if (!isPathInside(resolveWriteDestination(targetPath), realPathOrSelf(worktreeRoot))) return false;
+  return isLinkedGitWorktreeCheckout(worktreeRoot);
+}
+
+const MAX_WRITE_DESTINATION_LINK_HOPS = 32;
+
+/**
+ * Resolve the path a write to `targetPath` would actually land on.
+ *
+ * `fs.realpathSync` is not enough on its own: the destination usually does not
+ * exist yet, and a dangling symlink resolves to nothing while a write through
+ * it still creates the file at the link target. So each segment is resolved
+ * from the root down, following symlinks whether or not their target exists.
+ */
+function resolveWriteDestination(targetPath: string, hops = 0): string {
+  const absolute = path.resolve(targetPath);
+  if (hops >= MAX_WRITE_DESTINATION_LINK_HOPS) return absolute;
+
+  const parent = path.dirname(absolute);
+  const resolvedParent = parent === absolute ? absolute : resolveWriteDestination(parent, hops + 1);
+  const candidate = path.resolve(resolvedParent, path.basename(absolute));
+
+  const linkTarget = readSymlinkTarget(candidate);
+  if (!linkTarget) return candidate;
+  return resolveWriteDestination(path.resolve(path.dirname(candidate), linkTarget), hops + 1);
+}
+
+function readSymlinkTarget(targetPath: string): string | null {
+  try {
+    if (!fs.lstatSync(targetPath).isSymbolicLink()) return null;
+    return fs.readlinkSync(targetPath);
+  } catch {
+    return null;
+  }
 }
 
 function warnRefusedWorktreeRepairWrite(

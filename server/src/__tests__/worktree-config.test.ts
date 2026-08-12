@@ -559,6 +559,44 @@ describe("worktree config repair", () => {
     ).toBe(false);
   });
 
+  it("refuses writes that leave the checkout through a symlink", async () => {
+    // Lexical containment is not the boundary: a symlinked `.paperclip`, a
+    // symlinked file inside it, or a dangling symlink all stay lexically under
+    // the checkout while the write itself lands on the link target outside it.
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-symlink-guard-"));
+    const worktreeRoot = path.join(tempRoot, "PAP-8101-symlink");
+    const foreignRoot = path.join(tempRoot, "foreign-instance");
+
+    await fs.mkdir(path.join(worktreeRoot, ".paperclip"), { recursive: true });
+    await markLinkedGitWorktree(worktreeRoot);
+    await fs.mkdir(foreignRoot, { recursive: true });
+    await fs.writeFile(path.join(foreignRoot, "config.json"), "{}\n", "utf8");
+
+    // Symlinked file inside the checkout, pointing at an existing foreign file.
+    const linkedConfigPath = path.join(worktreeRoot, ".paperclip", "linked-config.json");
+    await fs.symlink(path.join(foreignRoot, "config.json"), linkedConfigPath);
+    expect(isWorktreeRepairWriteAllowed(worktreeRoot, linkedConfigPath)).toBe(false);
+
+    // Dangling symlink: nothing to `realpath`, but the write still lands outside.
+    const danglingEnvPath = path.join(worktreeRoot, ".paperclip", "dangling.env");
+    await fs.symlink(path.join(foreignRoot, "not-created-yet.env"), danglingEnvPath);
+    expect(isWorktreeRepairWriteAllowed(worktreeRoot, danglingEnvPath)).toBe(false);
+
+    // Symlinked parent directory: the destination file does not exist at all.
+    const linkedDirRoot = path.join(tempRoot, "PAP-8101-symlinked-dir");
+    await fs.mkdir(linkedDirRoot, { recursive: true });
+    await markLinkedGitWorktree(linkedDirRoot);
+    await fs.symlink(foreignRoot, path.join(linkedDirRoot, ".paperclip"));
+    expect(
+      isWorktreeRepairWriteAllowed(linkedDirRoot, path.join(linkedDirRoot, ".paperclip", ".env")),
+    ).toBe(false);
+
+    // A real file inside the checkout is still allowed.
+    expect(
+      isWorktreeRepairWriteAllowed(worktreeRoot, path.join(worktreeRoot, ".paperclip", "config.json")),
+    ).toBe(true);
+  });
+
   it("avoids sibling worktree ports when repairing legacy configs", async () => {
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-repair-ports-"));
     const worktreeRoot = path.join(tempRoot, "PAP-880-thumbs-capture-for-evals-feature");
