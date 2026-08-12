@@ -1958,7 +1958,6 @@ export function authorizationService(db: Db) {
             });
           }
           if (
-            input.action === "issue:comment" &&
             input.resource.type === "issue" &&
             input.resource.issueId &&
             await userHasParticipationGrantOnIssue({
