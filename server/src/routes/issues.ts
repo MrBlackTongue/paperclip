@@ -3843,7 +3843,11 @@ export function issueRoutes(
         res.status(403).json({ error: "Issue is outside this actor's authorization boundary" });
         return false;
       }
-      return boundaryDecision;
+      // Board/user writes keep recording their historical authorization reason;
+      // only the new participation grant surfaces itself on the comment.
+      return boundaryDecision.reason === "allow_issue_user_participation_grant"
+        ? boundaryDecision
+        : true;
     }
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
