@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   classifyContinuationFailure,
   CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS,
@@ -48,5 +48,28 @@ describe("Transient retry configuration parsing", () => {
   it("exports finite backoff >= 1000 ms (default 60 000)", () => {
     expect(Number.isFinite(CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS)).toBe(true);
     expect(CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it("caps large finite overrides instead of accepting them verbatim", async () => {
+    // A finite but absurd override is a typo, not a configuration choice: an attempt
+    // budget beyond the bounded retry-history window would never be exhausted (so the
+    // issue retries forever instead of escalating), and a multi-year backoff parks the
+    // issue past any useful intervention window.
+    const previousAttempts = process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS;
+    const previousBackoff = process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS;
+    process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS = "1000000";
+    process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS = String(365 * 24 * 60 * 60 * 1000);
+    try {
+      vi.resetModules();
+      const reloaded = await import("./service.js");
+      expect(reloaded.CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS).toBe(10);
+      expect(reloaded.CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS).toBe(6 * 60 * 60 * 1000);
+    } finally {
+      if (previousAttempts === undefined) delete process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS;
+      else process.env.RECOVERY_TRANSIENT_CONTINUATION_MAX_ATTEMPTS = previousAttempts;
+      if (previousBackoff === undefined) delete process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS;
+      else process.env.RECOVERY_TRANSIENT_CONTINUATION_BACKOFF_MS = previousBackoff;
+      vi.resetModules();
+    }
   });
 });

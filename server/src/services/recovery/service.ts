@@ -380,14 +380,26 @@ const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
 // 1 attempt so a misconfigured value cannot disable continuation recovery entirely.
 // Non-finite or non-integer values are rejected in favour of the default (3) so that
 // Infinity or a fractional count cannot produce an unbounded or subtly wrong budget.
+// A large finite value is capped rather than rejected: the retry history that feeds
+// `consecutive` is a bounded window, so an attempt budget beyond it would never be
+// reached and the issue would retry forever instead of escalating.
+const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS_CAP = 10;
+// The backoff ceilings keep a mistyped value (extra zeros, seconds written as
+// milliseconds) from parking an issue for months.
+const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_CAP_MS = 6 * 60 * 60 * 1000;
+const CONTINUATION_RECOVERY_TRANSIENT_MAX_BACKOFF_MS = 24 * 60 * 60 * 1000;
 function parseTransientMaxAttempts(raw: string | undefined): number {
   const parsed = Number(raw);
-  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 1) return parsed;
+  if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 1) {
+    return Math.min(parsed, CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS_CAP);
+  }
   return 3;
 }
 function parseTransientBackoffMs(raw: string | undefined): number {
   const parsed = Number(raw);
-  if (Number.isFinite(parsed) && parsed >= 1_000) return parsed;
+  if (Number.isFinite(parsed) && parsed >= 1_000) {
+    return Math.min(parsed, CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_CAP_MS);
+  }
   return 60_000;
 }
 export const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = parseTransientMaxAttempts(
@@ -4398,8 +4410,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
           if (classification.baseBackoffMs > 0 && latestFinishedAt) {
             const elapsed = Date.now() - latestFinishedAt.getTime();
-            const requiredDelay = classification.baseBackoffMs *
-              Math.pow(2, Math.max(0, consecutive - 1));
+            const requiredDelay = Math.min(
+              classification.baseBackoffMs * Math.pow(2, Math.max(0, consecutive - 1)),
+              CONTINUATION_RECOVERY_TRANSIENT_MAX_BACKOFF_MS,
+            );
             if (elapsed < requiredDelay) {
               result.skipped += 1;
               continue;
