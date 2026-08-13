@@ -9,6 +9,8 @@ import {
 } from "@paperclipai/shared";
 import { updateEnvFileContents, writeEnvFileAtomicallyIfChanged } from "@paperclipai/shared/env-file";
 import { isLinkedGitWorktreeCheckout } from "./dev-runner-worktree.js";
+import { resolvePaperclipConfigPath, resolvePaperclipEnvPath } from "./paths.js";
+import { rewriteUrlPort } from "./url-utils.js";
 
 const PAPERCLIP_WORKTREE_CONFIG_DIRNAME = ".paperclip";
 const PAPERCLIP_CONFIG_BASENAME = "config.json";
@@ -35,19 +37,6 @@ function sanitizeWorktreeInstanceId(rawValue: string): string {
     .replace(/-+/g, "-")
     .replace(/^[-_]+|[-_]+$/g, "");
   return normalized || "worktree";
-}
-
-function rewriteLocalUrlPort(rawUrl: string | undefined, port: number): string | undefined {
-  if (!rawUrl) return undefined;
-  try {
-    const parsed = new URL(rawUrl);
-    // The URL API normalizes default ports like :80/:443 to "", so treat them as stable URLs.
-    if (!parsed.port) return rawUrl;
-    parsed.port = String(port);
-    return parsed.toString();
-  } catch {
-    return rawUrl;
-  }
 }
 
 function parseEnvFile(contents: string): Record<string, string> {
@@ -609,7 +598,7 @@ function buildIsolatedWorktreeConfig(
   if (config.auth.baseUrlMode === "explicit" && config.auth.publicBaseUrl) {
     nextConfig.auth = {
       ...config.auth,
-      publicBaseUrl: rewriteLocalUrlPort(config.auth.publicBaseUrl, serverPort),
+      publicBaseUrl: rewriteUrlPort(config.auth.publicBaseUrl, serverPort),
     };
   }
 
@@ -685,7 +674,7 @@ export function applyRuntimePortSelectionToConfig(
   }
 
   if (nextConfig.auth.baseUrlMode === "explicit" && nextConfig.auth.publicBaseUrl) {
-    const rewritten = rewriteLocalUrlPort(nextConfig.auth.publicBaseUrl, input.serverPort);
+    const rewritten = rewriteUrlPort(nextConfig.auth.publicBaseUrl, input.serverPort);
     if (rewritten && rewritten !== nextConfig.auth.publicBaseUrl) {
       nextConfig = {
         ...nextConfig,
