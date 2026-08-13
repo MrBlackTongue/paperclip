@@ -30,6 +30,7 @@ vi.mock("../api/issues", () => ({
   issuesApi: {
     acceptInteraction: vi.fn(),
     rejectInteraction: vi.fn(),
+    decideStalledReview: vi.fn(() => Promise.resolve({})),
   },
 }));
 
@@ -117,6 +118,11 @@ function buildItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
     ruleKey: overrides.ruleKey ?? null,
     originAgentName: overrides.originAgentName ?? null,
     queues: overrides.queues ?? [],
+    shelf: overrides.shelf ?? false,
+    retentionDays: overrides.retentionDays ?? 30,
+    keep: overrides.keep ?? false,
+    archivedAt: overrides.archivedAt ?? null,
+    retentionVersion: overrides.retentionVersion ?? 1,
     decideBy: overrides.decideBy ?? null,
     decideByAttribution: overrides.decideByAttribution ?? null,
     snoozedUntil: overrides.snoozedUntil ?? null,
@@ -144,12 +150,42 @@ describe("AttentionQueueRow", () => {
     expect(el.textContent).not.toContain("Open");
   });
 
-  it("does not inline a review — it deep-links instead", () => {
+  it("inlines a stalled review with the three review verbs (PAP-16080 §4.4)", () => {
     const el = render(
       <AttentionQueueRow
         item={buildItem({
           sourceKind: "review" as AttentionSourceKind,
           inlineResolvable: true,
+          subject: {
+            kind: "issue",
+            id: "issue-1",
+            companyId: "c1",
+            title: "PR ready for review",
+            identifier: null,
+            status: "in_review",
+            href: "/PAP/issues/PAP-1",
+            metadata: { reviewAttentionState: "stalled" },
+          },
+        })}
+        companyId="c1"
+        expanded
+        onToggleExpand={noop}
+        onDismiss={noop}
+      />,
+    );
+    // Inline rows resolve in place, not via an "Open" deep-link.
+    expect(el.textContent).not.toContain("Open");
+    expect(el.textContent).toContain("Approve");
+    expect(el.textContent).toContain("Request changes");
+    expect(el.textContent).toContain("Send back to work");
+  });
+
+  it("deep-links a covered review instead of inlining", () => {
+    const el = render(
+      <AttentionQueueRow
+        item={buildItem({
+          sourceKind: "review" as AttentionSourceKind,
+          inlineResolvable: false,
           subject: {
             kind: "issue",
             id: "issue-1",
@@ -168,8 +204,7 @@ describe("AttentionQueueRow", () => {
       />,
     );
     expect(el.textContent).toContain("Open");
-    // No approval buttons should render for a review row.
-    expect(el.textContent).not.toContain("Request revision");
+    expect(el.textContent).not.toContain("Send back to work");
   });
 
   it("fires onDismiss from the row menu action", () => {
@@ -707,74 +742,19 @@ describe("AttentionQueueRow", () => {
     expect(gallery?.querySelectorAll("a")).toHaveLength(0);
   });
 
-  // Decision training (PAP-14299): a trainable row shows the train affordance;
-  // the trained/untrained state renders purely from `trainingExampleId`.
-  function trainableItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
-    return buildItem({
-      sourceKind: "issue_thread_interaction",
-      subject: {
-        kind: "interaction",
-        id: "interaction-1",
-        companyId: "c1",
-        title: "Approve the migration plan?",
-        identifier: null,
-        status: "pending",
-        href: "/PAP/issues/PAP-1",
-        metadata: { issueId: "issue-1", kind: "request_confirmation" },
-      },
-      ...overrides,
-    });
-  }
-
-  // Training moved off the header strip into the row's overflow menu, so the
-  // header carries only recency + overflow. Menu items live in a portal that
-  // only mounts once opened — environment-flaky in jsdom (see the dismiss test
-  // above) — so the untrained path asserts the menu exists and no badge is
-  // shown, and the onTrain contract is exercised through the inline badge.
-  it("offers training through the row menu and shows no badge until trained", () => {
+  it("does not surface training state or actions for decisions", () => {
     render(
       <AttentionQueueRow
-        item={trainableItem()}
+        item={buildItem({ trainingExampleId: "example-1" })}
         companyId="c1"
         expanded={false}
         onToggleExpand={noop}
         onDismiss={noop}
-        onTrain={noop}
       />,
     );
-    expect(container?.querySelector('[aria-label="Row actions"]')).toBeTruthy();
+    expect(container?.textContent).not.toContain("Train");
     expect(container?.querySelector('[data-testid="attention-trained-badge"]')).toBeNull();
-  });
-
-  it("renders a Trained ✓ badge once trained and fires onTrain when it is clicked", () => {
-    const onTrain = vi.fn();
-    render(
-      <AttentionQueueRow
-        item={trainableItem({ trainingExampleId: "example-1" })}
-        companyId="c1"
-        expanded={false}
-        onToggleExpand={noop}
-        onDismiss={noop}
-        onTrain={onTrain}
-      />,
-    );
-    const badge = container?.querySelector('[data-testid="attention-trained-badge"]');
-    expect(badge?.textContent).toContain("Trained");
-    act(() => badge?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    expect(onTrain).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }));
-  });
-
-  it("does not offer training on a decision that isn't anchored to an issue", () => {
-    render(
-      <AttentionQueueRow
-        item={buildItem({ subject: { ...buildItem().subject, metadata: {} }, relatedIssue: null })}
-        companyId="c1"
-        expanded={false}
-        onToggleExpand={noop}
-        onDismiss={noop}
-        onTrain={noop}
-      />,
-    );
+    expect(container?.querySelector('[data-testid="attention-train-inline"]')).toBeNull();
     expect(container?.querySelector('[data-testid="attention-train-button"]')).toBeNull();
   });
 });

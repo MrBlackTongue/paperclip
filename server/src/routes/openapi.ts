@@ -26,6 +26,7 @@ import {
   // Issue
   createIssueSchema,
   updateIssueSchema,
+  stalledReviewDecisionSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
   checkoutIssueSchema,
@@ -50,11 +51,14 @@ import {
   // Decisions
   addDecisionQueueItemSchema,
   createDecisionQueueSchema,
+  createDecisionArchiveProposalSchema,
   decisionAttentionSourceKindSchema,
   decisionInputsSchema,
   decisionOptionsSchema,
+  removeDecisionQueueItemSchema,
   updateDecisionQueueSchema,
   updateDecisionTriageSchema,
+  updateDecisionRetentionSchema,
   // Routine
   createRoutineSchema,
   updateRoutineSchema,
@@ -116,6 +120,8 @@ import {
   companySkillFileDeleteSchema,
   companySkillFileUpdateSchema,
   companySkillImportSchema,
+  companySkillProjectBrowseRequestSchema,
+  companySkillProjectBrowseResultSchema,
   companySkillProjectScanRequestSchema,
   companySkillProjectScanResultSchema,
   companySkillRenameResultSchema,
@@ -140,6 +146,7 @@ import {
   rejectIssueThreadInteractionSchema,
   respondIssueThreadInteractionSchema,
   submitIssueThreadInteractionVerdictsSchema,
+  withdrawIssueThreadInteractionSchema,
   // Auth / profile
   updateCurrentUserProfileSchema,
   // Company portability (legacy routes)
@@ -175,13 +182,14 @@ import {
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
   cancelIssueThreadInteractionSchema,
-  withdrawIssueThreadInteractionSchema,
   // Secret provider configs and remote import
   createSecretProviderConfigSchema,
   updateSecretProviderConfigSchema,
   secretProviderConfigDiscoveryPreviewSchema,
   remoteSecretImportPreviewSchema,
   remoteSecretImportSchema,
+  workspaceFileAvailabilityRequestSchema,
+  workspaceFileAvailabilityResponseSchema,
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
   // Tool access
@@ -217,6 +225,10 @@ import {
   toolPolicyTestRequestSchema,
   createToolMcpGatewaySchema,
 } from "@paperclipai/shared";
+import {
+  COMPANY_IMPORT_TRANSFERS_API_PATH,
+  companyImportTransferDeclarationSchema,
+} from "@paperclipai/shared/company-import-transfer";
 
 type JsonSchema = Record<string, unknown>;
 type OpenApiResponse = Record<string, unknown>;
@@ -575,6 +587,13 @@ const refreshExternalObjectsBodySchema = z.object({
   objectIds: z.array(z.string().uuid()).max(50).optional(),
 }).strict();
 
+// The start route reads the body directly, so document the accepted fields
+// here. A sandbox environment is required. The time-to-live is optional.
+const startAdapterLoginSessionSchema = z.object({
+  environmentId: z.string().min(1),
+  ttlSeconds: z.number().optional(),
+});
+
 const environmentCustomImageCompanyQuerySchema = z.object({
   companyId: z.string().optional(),
 }).strict();
@@ -753,6 +772,7 @@ const BOARD_ONLY_PREFIXES = [
 ];
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/cloud/stacks",
   "GET /api/companies",
   "POST /api/companies",
   "GET /api/companies/stats",
@@ -805,12 +825,14 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/secrets/{id}/usage",
   "GET /api/secrets/{id}/access-events",
   "POST /api/health/dev-server/restart",
+  "POST /api/issues/{issueId}/file-resources/availability",
   "GET /api/issues/{issueId}/file-resources/content",
   "GET /api/issues/{issueId}/file-resources/list",
   "GET /api/issues/{issueId}/file-resources/resolve",
   "POST /api/issues/{id}/interactions/{interactionId}/accept",
   "POST /api/issues/{id}/interactions/{interactionId}/reject",
   "POST /api/issues/{id}/interactions/{interactionId}/respond",
+  "POST /api/issues/{id}/interactions/{interactionId}/withdraw",
   "GET /api/companies/{companyId}/tools/gallery",
   "POST /api/companies/{companyId}/tools/apps/connect",
   "POST /api/companies/{companyId}/tools/apps/{connectionId}/finish",
@@ -904,6 +926,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/approvals/{id}/comments",
   "POST /api/companies/{companyId}/assets/images",
   "POST /api/companies/{companyId}/logo",
+  "POST /api/companies/{companyId}/onboarding-seed",
   "POST /api/cli-auth/challenges",
   "POST /api/board-api-keys",
   "POST /api/companies",
@@ -1108,6 +1131,13 @@ registry.registerPath({
       // unavailable. Present on every response shape, including redacted ones.
       commit: z.string().nullable(),
       deploymentMode: z.string().optional(),
+      cloud: z.object({
+        managed: z.literal(true),
+        managedBy: z.literal("paperclip-cloud"),
+        stackSlug: z.string().nullable(),
+        stackDisplayName: z.string().optional(),
+        cloudBaseUrl: z.string().nullable(),
+      }).strict().optional(),
       bootstrapStatus: z.enum(["ready", "bootstrap_pending"]).optional(),
       bootstrapInviteActive: z.boolean().optional(),
       databaseBackup: z.object({
@@ -1173,6 +1203,21 @@ registry.registerPath({
 });
 
 // ─── Companies ───────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/cloud/stacks",
+  tags: ["cloud"],
+  summary: "List the current Cloud tenant user's stacks",
+  responses: {
+    200: r.ok(),
+    403: r.forbidden,
+    404: r.notFound,
+    502: r.serverError,
+    503: r.serverError,
+    500: r.serverError,
+  },
+});
 
 registry.registerPath({
   method: "get",
@@ -1653,6 +1698,61 @@ const AgentSecretListResponseSchema = z.object({
   })),
 });
 
+const createAgentSecretProposalSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("secret"),
+    name: z.string().min(1),
+    description: z.string().optional().nullable(),
+    value: z.string().min(1),
+    justification: z.string().min(1),
+  }),
+  z.object({
+    kind: z.literal("binding"),
+    secretId: z.string().uuid().optional(),
+    secretProposalId: z.string().uuid().optional(),
+    targetAgentId: z.string().uuid().optional(),
+    configPath: z.string().min(1),
+    justification: z.string().min(1),
+  }),
+]);
+
+const approveSecretProposalSchema = z.object({
+  cascade: z.boolean().optional(),
+  overrides: z.object({
+    name: z.string().min(1).optional(),
+    description: z.string().optional().nullable(),
+    providerConfigId: z.string().uuid().optional().nullable(),
+  }).optional(),
+});
+
+const rejectSecretProposalSchema = z.object({ reason: z.string().min(1) });
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/me/secret-proposals",
+  tags: ["secrets"],
+  summary: "Propose a company secret or agent secret binding",
+  request: { body: jsonBody(createAgentSecretProposalSchema) },
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/me/secret-proposals",
+  tags: ["secrets"],
+  summary: "List secret proposals visible to the current agent run",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/agents/me/secret-proposals/{id}",
+  tags: ["secrets"],
+  summary: "Withdraw a pending secret proposal",
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
 registry.registerPath({
   method: "get",
   path: "/api/agents/me/secrets",
@@ -1890,7 +1990,7 @@ registry.registerPath({
     params: z.object({ id: z.string() }),
     body: jsonBody(agentSkillSyncSchema),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -2011,6 +2111,46 @@ registry.registerPath({
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/adapters/{type}/login-sessions",
+  tags: ["adapters"],
+  summary: "Start a company-scoped adapter device login",
+  request: {
+    params: z.object({ companyId: z.string(), type: z.string() }),
+    body: jsonBody(startAdapterLoginSessionSchema),
+  },
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/adapters/{type}/login-sessions/{sessionId}",
+  tags: ["adapters"],
+  summary: "Read an adapter device login session",
+  request: {
+    params: z.object({ companyId: z.string(), type: z.string(), sessionId: z.string() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/adapters/{type}/login-sessions/{sessionId}/cancel",
+  tags: ["adapters"],
+  summary: "Cancel an adapter device login session",
+  request: {
+    params: z.object({ companyId: z.string(), type: z.string(), sessionId: z.string() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
 // ─── Issues ──────────────────────────────────────────────────────────────────
 
 registry.registerPath({
@@ -2057,6 +2197,25 @@ registry.registerPath({
     body: jsonBody(updateIssueSchema.partial()),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/stalled-review-decision",
+  tags: ["issues"],
+  summary: "Resolve a stalled issue review",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(stalledReviewDecisionSchema),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registry.registerPath({
@@ -2378,6 +2537,28 @@ registry.registerPath({
   summary: "Get a feedback trace bundle",
   request: { params: z.object({ traceId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{issueId}/file-resources/availability",
+  tags: ["issues"],
+  summary: "Check whether issue workspace files can be opened",
+  request: {
+    params: z.object({ issueId: z.string() }),
+    body: {
+      required: true,
+      content: { "application/json": { schema: workspaceFileAvailabilityRequestSchema } },
+    },
+  },
+  responses: {
+    200: r.ok(workspaceFileAvailabilityResponseSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    429: r.tooManyRequests,
+  },
 });
 
 registry.registerPath({
@@ -2770,6 +2951,42 @@ registry.registerPath({
     body: jsonBody(createSecretSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/secret-proposals",
+  tags: ["secrets"],
+  summary: "List company secret proposals for board review",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    query: z.object({ status: z.enum(["pending", "approved", "rejected", "withdrawn", "expired"]).optional() }),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/secret-proposals/{id}/approve",
+  tags: ["secrets"],
+  summary: "Approve and execute a secret proposal as the approving board user",
+  request: {
+    params: z.object({ companyId: z.string().uuid(), id: z.string().uuid() }),
+    body: jsonBody(approveSecretProposalSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/secret-proposals/{id}/reject",
+  tags: ["secrets"],
+  summary: "Reject a pending secret proposal and dependent bindings",
+  request: {
+    params: z.object({ companyId: z.string().uuid(), id: z.string().uuid() }),
+    body: jsonBody(rejectSecretProposalSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -3276,7 +3493,20 @@ registry.registerPath({
   path: "/api/companies/{companyId}/attention",
   tags: ["inbox"],
   summary: "List decision-only attention feed items",
-  request: { params: z.object({ companyId: z.string() }) },
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({
+      includeDismissed: z.enum(["true", "false"]).optional(),
+      archived: z.enum(["true", "false"]).optional(),
+      all: z.enum(["true", "false"]).optional(),
+      activitySince: z.string().datetime().optional(),
+      activityUntil: z.string().datetime().optional(),
+      queue: z.string().min(1).optional(),
+      sort: z.enum(["activity", "decide"]).optional(),
+      cursor: z.string().min(1).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }),
+  },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -3339,6 +3569,25 @@ const decisionTriageSchema = z.object({
   setByRunId: z.string().nullable(),
   responsibleUserId: z.string().nullable(),
   version: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+}).strict();
+
+const decisionRetentionSchema = z.object({
+  id: z.string(),
+  companyId: z.string(),
+  sourceKind: decisionAttentionSourceKindSchema,
+  sourceId: z.string(),
+  sourceActivityAt: z.string().datetime(),
+  keep: z.boolean(),
+  archivedAt: z.string().datetime().nullable(),
+  archivedReason: z.string().nullable(),
+  archivedByType: z.enum(["agent", "user", "system"]).nullable(),
+  archivedByAgentId: z.string().nullable(),
+  archivedByUserId: z.string().nullable(),
+  archivedByRunId: z.string().nullable(),
+  version: z.number().int().positive(),
+  archiveVersion: z.number().int().nonnegative(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).strict();
@@ -3423,6 +3672,7 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/decision-queues/{key}/items/{sourceKind}/{sourceId}",
   tags: ["decision-queues"],
   summary: "Remove an item from a decision queue",
+  body: removeDecisionQueueItemSchema,
   responses: {
     200: r.ok(decisionQueueItemSchema),
     400: r.badRequest,
@@ -3460,6 +3710,34 @@ registerCurrentRoute({
     404: r.notFound,
     422: r.unprocessable,
   },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/decision-retention/{sourceKind}/{sourceId}",
+  tags: ["decision-queues"],
+  summary: "Set Keep for an attention source",
+  body: updateDecisionRetentionSchema,
+  responses: { 200: r.ok(decisionRetentionSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+for (const action of ["archive", "revive"] as const) {
+  registerCurrentRoute({
+    method: "post",
+    path: `/api/companies/{companyId}/decision-retention/{sourceKind}/{sourceId}/${action}`,
+    tags: ["decision-queues"],
+    summary: action === "archive" ? "Archive an attention source" : "Revive an archived attention source",
+    responses: { 200: r.ok(decisionRetentionSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+  });
+}
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/decision-archive-proposals",
+  tags: ["decisions"],
+  summary: "Propose one signed bulk archive decision",
+  body: createDecisionArchiveProposalSchema,
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict, 422: r.unprocessable },
 });
 
 // Decisions
@@ -4211,6 +4489,99 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+// Setup-token login session routes. The owner user starts one session, reads the
+// login prompt, submits the browser code, and receives the token. The prompt,
+// code, and token responses require a confidential transport; the guard returns
+// 403 when the transport is not confidential.
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/setup-token-login-sessions",
+  tags: ["agents"],
+  summary: "Start a setup-token login session for an agent",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    503: r.serverError,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/setup-token-login-sessions/{sessionId}/prompt",
+  tags: ["agents"],
+  summary: "Read the login prompt for a setup-token login session",
+  request: { params: z.object({ id: z.string(), sessionId: z.string() }) },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/setup-token-login-sessions/{sessionId}/code",
+  tags: ["agents"],
+  summary: "Submit the browser code for a setup-token login session",
+  request: { params: z.object({ id: z.string(), sessionId: z.string() }) },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/setup-token-login-sessions/{sessionId}/cancel",
+  tags: ["agents"],
+  summary: "Cancel a setup-token login session",
+  request: { params: z.object({ id: z.string(), sessionId: z.string() }) },
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/setup-token-login-sessions/{sessionId}/expire",
+  tags: ["agents"],
+  summary: "Expire a setup-token login session",
+  request: { params: z.object({ id: z.string(), sessionId: z.string() }) },
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/setup-token-login-sessions/{sessionId}/token",
+  tags: ["agents"],
+  summary: "Receive the token from a completed setup-token login session",
+  request: { params: z.object({ id: z.string(), sessionId: z.string() }) },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
 // ─── Issue interactions & tree ───────────────────────────────────────────────
 
 registry.registerPath({
@@ -4280,6 +4651,18 @@ registry.registerPath({
     body: jsonBody(submitIssueThreadInteractionVerdictsSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/interactions/{interactionId}/withdraw",
+  tags: ["issues"],
+  summary: "Withdraw a pending issue thread interaction",
+  request: {
+    params: z.object({ id: z.string(), interactionId: z.string() }),
+    body: jsonBody(withdrawIssueThreadInteractionSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({
@@ -4410,6 +4793,15 @@ registry.registerPath({
   summary: "Upload company logo",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/onboarding-seed",
+  tags: ["companies"],
+  summary: "Apply the onboarding seed Paperclip Cloud collected at signup",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -4660,6 +5052,18 @@ registry.registerPath({
     body: jsonBody(companySkillImportSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/skills/browse-project",
+  tags: ["skills"],
+  summary: "Browse a project workspace for skills",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(companySkillProjectBrowseRequestSchema),
+  },
+  responses: { 200: r.ok(companySkillProjectBrowseResultSchema), 400: r.badRequest, 401: r.unauthorized },
 });
 
 registry.registerPath({
@@ -5692,6 +6096,123 @@ registry.registerPath({
     400: r.badRequest,
     401: r.unauthorized,
     409: { description: "An async import job is already running for this actor" },
+    422: r.unprocessable,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: COMPANY_IMPORT_TRANSFERS_API_PATH,
+  tags: ["companies"],
+  summary: "Declare a chunked company import transfer",
+  description:
+    "Declares the caller's existing company package .zip as content-addressed byte-range parts " +
+    "(whole-file plus per-part sha256). Re-declaring the same zip resumes the prior transfer " +
+    "with its uploaded parts intact; the response carries the transfer id and the part indexes " +
+    "still missing.",
+  request: { body: jsonBody(companyImportTransferDeclarationSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "put",
+  path: `${COMPANY_IMPORT_TRANSFERS_API_PATH}/{transferId}/parts/{partIndex}`,
+  tags: ["companies"],
+  summary: "Upload one declared part of a company import transfer",
+  description:
+    "Raw part bytes as the request body. The upload is verified against the declared byte size " +
+    "and sha256 before it is spooled; re-uploading an already completed part is a no-op success. " +
+    "Uploading against a transfer the abandoned-spool sweep has expired returns 410 — the client " +
+    "re-creates the transfer.",
+  request: {
+    params: z.object({ transferId: z.string(), partIndex: z.string() }),
+    body: {
+      content: {
+        "application/octet-stream": {
+          schema: { type: "string", format: "binary", description: "The raw part bytes." },
+        },
+      },
+      required: true as const,
+    },
+  },
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    404: r.notFound,
+    409: { description: "The transfer has already been applied" },
+    410: { description: "The transfer expired and its spooled parts were deleted" },
+    422: r.unprocessable,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: `${COMPANY_IMPORT_TRANSFERS_API_PATH}/{transferId}`,
+  tags: ["companies"],
+  summary: "Get company import transfer progress",
+  description:
+    "Resume polling for a chunked import transfer: the transfer status plus which declared " +
+    "parts are completed and which are still missing.",
+  request: { params: z.object({ transferId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: `${COMPANY_IMPORT_TRANSFERS_API_PATH}/{transferId}/preview`,
+  tags: ["companies"],
+  summary: "Preview a completed company import transfer",
+  description:
+    "Runs the import preview against the assembled spool without consuming the transfer: the " +
+    "ledger run stays open and the parts stay spooled, so the subsequent apply reuses them " +
+    "instead of re-uploading. The JSON body carries the same fields as the multipart preview " +
+    "route's `meta` field (include, target, collisionStrategy, ...).",
+  request: {
+    params: z.object({ transferId: z.string() }),
+    body: jsonBody(companyPortabilityPreviewSchema.omit({ source: true })),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+    409: {
+      description:
+        "Parts are still missing, an apply is in progress, or the transfer was already applied",
+    },
+    410: { description: "The transfer expired and its spooled parts were deleted" },
+    422: r.unprocessable,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: `${COMPANY_IMPORT_TRANSFERS_API_PATH}/{transferId}/apply`,
+  tags: ["companies"],
+  summary: "Apply a completed company import transfer",
+  description:
+    "Assembles the spooled parts back into the original zip, verifies the whole file against " +
+    "the declared hash fail-closed, and runs it through the same import pipeline as the " +
+    "single-shot upload — including the async import job machinery via the proxy-safe " +
+    "`?async=1` query parameter. The JSON body carries the same import fields as the multipart " +
+    "route's `meta` field (include, target, collisionStrategy, ...). Overlapping applies of " +
+    "the same transfer are serialized: exactly one proceeds, the rest get 409.",
+  request: {
+    params: z.object({ transferId: z.string() }),
+    query: z.object({ async: z.enum(["1"]).optional() }),
+    body: jsonBody(companyPortabilityImportSchema.omit({ source: true })),
+  },
+  responses: {
+    200: r.ok(),
+    202: { description: "Async import job accepted" },
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+    409: {
+      description:
+        "Parts are still missing, an apply is already in progress, or the transfer was already applied",
+    },
+    410: { description: "The transfer expired and its spooled parts were deleted" },
     422: r.unprocessable,
   },
 });

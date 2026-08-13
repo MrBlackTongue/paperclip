@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
+import { COMPANY_IMPORT_TRANSFERS_ROUTE_PATH } from "@paperclipai/shared/company-import-transfer";
 import { errorHandler } from "../middleware/index.js";
 import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
 
@@ -21,6 +22,7 @@ const apiPrefixes: Record<string, string> = {
   "auth.ts": "/api/auth",
   "board-chat.ts": "/api",
   "built-in-agents.ts": "/api",
+  "cloud.ts": "/api/cloud",
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
   "company-skill-policy.ts": "/api",
@@ -42,6 +44,7 @@ const apiPrefixes: Record<string, string> = {
   "issues.ts": "/api",
   "issue-tree-control.ts": "/api",
   "llms.ts": "/api",
+  "onboarding-seed.ts": "/api",
   "openapi.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
@@ -78,8 +81,18 @@ function createApp() {
   return app;
 }
 
+// Route files may compose paths from shared path constants inside template
+// literals; substitute the constants' values before normalizing.
+const routePathConstantSubstitutions: Record<string, string> = {
+  "${COMPANY_IMPORT_TRANSFERS_ROUTE_PATH}": COMPANY_IMPORT_TRANSFERS_ROUTE_PATH,
+};
+
 function normalizeExpressPath(routePath: string) {
-  return routePath
+  let substituted = routePath;
+  for (const [placeholder, value] of Object.entries(routePathConstantSubstitutions)) {
+    substituted = substituted.split(placeholder).join(value);
+  }
+  return substituted
     .replace(/\*([A-Za-z0-9_]+)/g, "{$1}")
     .replace(/:([A-Za-z0-9_]+)/g, "{$1}")
     .replace(/\/+/g, "/");
@@ -124,6 +137,9 @@ function loadActualRoutes() {
 
     if (file === "companies.ts" && source.includes("router.post(COMPANY_IMPORT_ROUTE_PATH")) {
       routes.add("POST /api/companies/import");
+    }
+    if (file === "companies.ts" && source.includes("router.post(COMPANY_IMPORT_TRANSFERS_ROUTE_PATH")) {
+      routes.add(`POST /api/companies${COMPANY_IMPORT_TRANSFERS_ROUTE_PATH}`);
     }
   }
 
@@ -188,6 +204,9 @@ describe("openapi routes", () => {
       },
     });
     expect(res.body.paths["/api/companies/{companyId}/folders"].post.responses["201"]).toBeDefined();
+    expect(
+      res.body.paths["/api/issues/{id}/interactions/{interactionId}/withdraw"].post.summary,
+    ).toBe("Withdraw a pending issue thread interaction");
     expect(res.body.paths["/api/companies/{companyId}/folders/items/move"].post.summary).toBe(
       "Move an item into or out of a folder",
     );

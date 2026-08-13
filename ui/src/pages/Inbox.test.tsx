@@ -184,6 +184,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     description: null,
     status: "todo",
     priority: "medium",
+    reviewPolicy: null,
     assigneeAgentId: null,
     assigneeUserId: null,
     responsibleUserId: null,
@@ -344,6 +345,80 @@ describe("Inbox toolbar", () => {
     act(() => root.unmount());
   });
 
+  it("restores folded and unfolded sub-tasks across remounts", async () => {
+    routerMock.location.pathname = "/inbox/mine";
+    const storageKey = "paperclip:inbox:collapsed-parents:company-1";
+    localStorage.removeItem(storageKey);
+
+    const parent = createIssue({
+      id: "parent-issue",
+      identifier: "PAP-1001",
+      title: "Parent inbox task",
+    });
+    const child = createIssue({
+      id: "child-issue",
+      identifier: "PAP-1002",
+      parentId: parent.id,
+      title: "Nested inbox task",
+    });
+    apiMocks.issuesList.mockResolvedValue([parent, child]);
+
+    const mountInbox = async () => {
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0 } },
+      });
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <Inbox />
+          </QueryClientProvider>,
+        );
+      });
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain(parent.title);
+      });
+      return root;
+    };
+    const parentToggle = () => {
+      const parentRow = Array.from(container.querySelectorAll("[data-inbox-item]"))
+        .find((row) => row.textContent?.includes(parent.title));
+      return parentRow?.querySelector<HTMLButtonElement>('button[data-slot="icon-button"]') ?? null;
+    };
+
+    let root = await mountInbox();
+    try {
+      expect(container.textContent).toContain(child.title);
+
+      await act(async () => {
+        parentToggle()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await vi.waitFor(() => {
+        expect(container.textContent).not.toContain(child.title);
+      });
+      expect(JSON.parse(localStorage.getItem(storageKey) ?? "[]")).toEqual([parent.id]);
+
+      act(() => root.unmount());
+      root = await mountInbox();
+      expect(container.textContent).not.toContain(child.title);
+
+      await act(async () => {
+        parentToggle()?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain(child.title);
+      });
+      expect(JSON.parse(localStorage.getItem(storageKey) ?? "[]")).toEqual([]);
+
+      act(() => root.unmount());
+      root = await mountInbox();
+      expect(container.textContent).toContain(child.title);
+    } finally {
+      localStorage.removeItem(storageKey);
+      act(() => root.unmount());
+    }
+  });
+
   it("shows blocked toolbar controls on the Blocked tab", async () => {
     routerMock.location.pathname = "/inbox/blocked";
     const queryClient = new QueryClient({
@@ -465,12 +540,14 @@ describe("Inbox toolbar", () => {
 
     const rows = container.querySelectorAll("[data-inbox-item]");
 
-    const linkOf = (row: Element): HTMLAnchorElement | null =>
-      row.querySelector("a[data-inbox-issue-link]");
+    // The hover wash lives on the IssueRow root band (the overlay link's
+    // parent), not the overlay link itself.
+    const bandOf = (row: Element): HTMLElement | null =>
+      row.querySelector<HTMLAnchorElement>("a[data-inbox-issue-link]")?.parentElement ?? null;
 
     // Nothing selected before hover — both rows show the hover-accent class.
-    expect(linkOf(rows[0]!)?.className).toContain("hover:bg-accent/50");
-    expect(linkOf(rows[1]!)?.className).toContain("hover:bg-accent/50");
+    expect(bandOf(rows[0]!)?.className).toContain("hover:bg-accent/50");
+    expect(bandOf(rows[1]!)?.className).toContain("hover:bg-accent/50");
 
     // Hovering paints via CSS `:hover` only — it must NOT flip a row into the
     // state-selected band (which would swap to hover:bg-transparent). Coupling
@@ -482,9 +559,9 @@ describe("Inbox toolbar", () => {
       rows[1]!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
       rows[1]!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
     });
-    expect(linkOf(rows[0]!)?.className).toContain("hover:bg-accent/50");
-    expect(linkOf(rows[1]!)?.className).toContain("hover:bg-accent/50");
-    expect(linkOf(rows[1]!)?.className).not.toContain("hover:bg-transparent");
+    expect(bandOf(rows[0]!)?.className).toContain("hover:bg-accent/50");
+    expect(bandOf(rows[1]!)?.className).toContain("hover:bg-accent/50");
+    expect(bandOf(rows[1]!)?.className).not.toContain("hover:bg-transparent");
 
     act(() => {
       root.unmount();
@@ -578,12 +655,13 @@ describe("Inbox toolbar", () => {
     });
     const root = createRoot(container);
 
-    const linkOf = (row: Element): HTMLAnchorElement | null =>
-      row.querySelector("a[data-inbox-issue-link]");
-    // The keyboard-selected row swaps to `hover:bg-transparent`; find its index.
+    // The keyboard-selected row swaps to `hover:bg-transparent` on its root
+    // band (the overlay link's parent, where the wash now lives); find its index.
+    const bandOf = (row: Element): HTMLElement | null =>
+      row.querySelector<HTMLAnchorElement>("a[data-inbox-issue-link]")?.parentElement ?? null;
     const selectedRowIndex = () =>
       [...container.querySelectorAll("[data-inbox-item]")].findIndex((row) =>
-        linkOf(row)?.className.includes("hover:bg-transparent"),
+        bandOf(row)?.className.includes("hover:bg-transparent"),
       );
 
     try {

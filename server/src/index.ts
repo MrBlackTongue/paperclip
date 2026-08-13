@@ -39,15 +39,21 @@ import {
 } from "./services/managed-config.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
+import { cloudActorHeaderSourceFromHeaders, resolveCloudTenantActor } from "./middleware/auth.js";
 import {
   feedbackService,
   applyManagedEnvironments,
+  attentionService,
   backfillPrincipalAccessCompatibility,
   backfillLegacyToolOAuthTokens,
   bootstrapExecutionPolicyFromEnv,
   environmentCustomImageService,
   decisionService,
+  decisionRetentionService,
+  externalObjectService,
+  executionWorkspaceService,
   heartbeatService,
+  issueThreadInteractionService,
   issueService,
   instanceSettingsService,
   reconcileBuiltInAgentsOnStartup,
@@ -58,6 +64,13 @@ import {
   toolAccessService,
 } from "./services/index.js";
 import { queueIssueAssignmentWakeup } from "./services/issue-assignment-wakeup.js";
+import { createSecretProposalsService } from "./services/secret-proposals.js";
+import { environmentRuntimeService } from "./services/environment-runtime.js";
+import { createDbAdapterAuthSessionStore } from "./services/codex-device-login-service.js";
+import {
+  createCodexDeviceLoginReaper,
+  createProductionLoginSessionReaperRuntime,
+} from "./services/codex-device-login-reaper.js";
 import { resolveWorktreeRunExecutionActivationState } from "./services/instance-settings.js";
 import {
   parseAdapterRegistryEnv,
@@ -65,6 +78,7 @@ import {
 } from "./services/adapter-registry-bootstrap.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
+import { isLoopbackHost, rewriteLoopbackUrlPort } from "./url-utils.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
@@ -73,8 +87,11 @@ import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { conflict } from "./errors.js";
 import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
-import { createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
-import { coordinateHeartbeatSchedulerShutdown } from "./shutdown.js";
+import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
+import {
+  coordinateHeartbeatSchedulerShutdown,
+  loadWithoutCoordinatedShutdownSignalHooks,
+} from "./shutdown.js";
 import { systemdNotify } from "./services/systemd-notify.js";
 import { flushInFlightRunLogMirrors } from "./services/run-log-store.js";
 import type {
@@ -219,11 +236,6 @@ export async function startServer(): Promise<StartedServer> {
     return "applied (pending migrations)";
   }
   
-  function isLoopbackHost(host: string): boolean {
-    const normalized = host.trim().toLowerCase();
-    return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
-  }
-
   function isPostgresConnectionString(connectionString: string): boolean {
     try {
       const parsed = new URL(connectionString);
@@ -249,19 +261,6 @@ export async function startServer(): Promise<StartedServer> {
     }
   }
 
-  function rewriteLocalUrlPort(rawUrl: string | undefined, port: number): string | undefined {
-    if (!rawUrl) return undefined;
-    try {
-      const parsed = new URL(rawUrl);
-      // The URL API normalizes default ports like :80/:443 to "", so treat them as stable URLs.
-      if (!parsed.port) return rawUrl;
-      parsed.port = String(port);
-      return parsed.toString();
-    } catch {
-      return rawUrl;
-    }
-  }
-  
   const LOCAL_BOARD_USER_ID = "local-board";
   const LOCAL_BOARD_USER_EMAIL = "local@paperclip.local";
   const LOCAL_BOARD_USER_NAME = "Board";
@@ -346,7 +345,13 @@ export async function startServer(): Promise<StartedServer> {
     const moduleName = "embedded-postgres";
     let EmbeddedPostgres: EmbeddedPostgresCtor;
     try {
-      const mod = await import(moduleName);
+      // embedded-postgres registers async-exit-hook handlers as an import side
+      // effect. Those handlers stop PostgreSQL immediately on SIGINT/SIGTERM,
+      // racing Paperclip's later heartbeat snapshot query. Paperclip explicitly
+      // stops the managed cluster in its own ordered shutdown path instead.
+      const mod = await loadWithoutCoordinatedShutdownSignalHooks(
+        () => import(moduleName),
+      );
       EmbeddedPostgres = mod.default as EmbeddedPostgresCtor;
     } catch {
       throw new Error(
@@ -536,7 +541,7 @@ export async function startServer(): Promise<StartedServer> {
   const requestedListenPort = config.port;
   const listenPort = await detectPort(requestedListenPort);
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
-    config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
+    config.authPublicBaseUrl = rewriteLoopbackUrlPort(config.authPublicBaseUrl, listenPort);
   }
   
   let authReady = config.deploymentMode === "local_trusted";
@@ -557,6 +562,11 @@ export async function startServer(): Promise<StartedServer> {
   const toolOAuthBackfill = await backfillLegacyToolOAuthTokens(db as any);
   if (toolOAuthBackfill.sanitizedConnections > 0 || toolOAuthBackfill.migratedConnections > 0) {
     logger.info(toolOAuthBackfill, "Backfilled legacy tool OAuth credentials into company secrets");
+  }
+  const confirmationSweep = await issueThreadInteractionService(db as any)
+    .sweepSupersededPendingRequestConfirmations();
+  if (confirmationSweep.expired > 0) {
+    logger.info(confirmationSweep, "Expired pending confirmations superseded by newer agent requests");
   }
   if (config.deploymentMode === "authenticated") {
     const {
@@ -741,6 +751,7 @@ export async function startServer(): Promise<StartedServer> {
     deploymentExposure: config.deploymentExposure,
     allowedHostnames: config.allowedHostnames,
     bindHost: config.host,
+    authPublicBaseUrl: config.authPublicBaseUrl,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
@@ -789,6 +800,20 @@ export async function startServer(): Promise<StartedServer> {
   setupLiveEventsWebSocketServer(server, db as any, {
     deploymentMode: config.deploymentMode,
     resolveSessionFromHeaders,
+    // Cloud-proxied browsers carry trusted x-paperclip-cloud-* headers instead
+    // of a local Better Auth session; without this lane every live-events
+    // upgrade behind the Cloud front door 403s forever. The resolver is
+    // self-gating: it returns null unless PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN
+    // is configured and the request presents the matching trust token, so
+    // self-hosted deployments never take this path.
+    resolveCloudActor: async (req) => {
+      const actor = await resolveCloudTenantActor(
+        db as any,
+        cloudActorHeaderSourceFromHeaders(req.headers),
+      );
+      if (!actor?.userId || !actor.companyIds) return null;
+      return { userId: actor.userId, companyIds: actor.companyIds };
+    },
   });
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)
@@ -891,8 +916,14 @@ export async function startServer(): Promise<StartedServer> {
     throw err;
   }
 
-  let drainHeartbeatRunsForShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<unknown>) | null = null;
-  let prepareHotRestartShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<{ skipDrain: boolean }>) | null = null;
+  let drainHeartbeatRunsForShutdown: ((
+    signal: "SIGINT" | "SIGTERM",
+    runIds?: readonly string[] | null,
+  ) => Promise<unknown>) | null = null;
+  let prepareHotRestartShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<{
+    skipDrain: boolean;
+    drainRunIds?: string[];
+  }>) | null = null;
   let heartbeatSchedulerStopped = false;
   let heartbeatSchedulerInterval: ReturnType<typeof setInterval> | null = null;
   const heartbeatSchedulerInFlight = new Set<Promise<void>>();
@@ -910,15 +941,123 @@ export async function startServer(): Promise<StartedServer> {
       await Promise.allSettled([...heartbeatSchedulerInFlight]);
     }
   };
+  const startHeartbeatSchedulerInterval = (callback: () => void) => {
+    heartbeatSchedulerInterval = setInterval(callback, config.heartbeatSchedulerIntervalMs);
+    heartbeatSchedulerInterval?.unref?.();
+  };
+  const externalObjects = externalObjectService(db as any, {
+    pluginWorkerManager,
+    enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
+  });
+  const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
+    if (heartbeatSchedulerStopped) return;
+    trackHeartbeatSchedulerWork(externalObjects
+      .refreshDueObjectsForActiveCompanies(50, now)
+      .then((result) => {
+        if (result.checked > 0 || result.refreshed > 0) {
+          logger.info({ ...result }, "external-object scheduler tick refreshed due objects");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "external-object scheduler tick failed");
+      }));
+  };
 
   if (heartbeat) {
+    const secretProposals = createSecretProposalsService(db as any);
     const decisionExecutor = decisionService(db as any, decisionServiceOptions);
-    drainHeartbeatRunsForShutdown = heartbeat.drainRunningRunsForShutdown;
+    const retentionExecutor = decisionRetentionService(db as any, {
+      notifyOriginAgent: createDecisionRetentionNotifyOriginAgent(heartbeat.wakeup),
+    });
+    drainHeartbeatRunsForShutdown = (signal, runIds) => (
+      heartbeat.drainRunningRunsForShutdown(signal, new Date(), runIds)
+    );
     prepareHotRestartShutdown = heartbeat.prepareHotRestartShutdown;
     const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
     const routines = routineService(db as any, { pluginWorkerManager });
     const statusCards = statusCardService(db as any);
     const issues = issueService(db as any);
+    const mergedPullRequestConfirmations = issueThreadInteractionService(db as any, {
+      wakeup: heartbeat.wakeup,
+    });
+    const terminalWorkspaces = executionWorkspaceService(db as any);
+    const scheduleMergedPullRequestConfirmationSweep = () => {
+      if (heartbeatSchedulerStopped) return;
+      trackHeartbeatSchedulerWork(mergedPullRequestConfirmations
+        .sweepMergedPullRequestConfirmations()
+        .then((result) => {
+          if (result.accepted > 0) {
+            logger.info(result, "accepted merge confirmations for merged pull requests");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "merged pull-request confirmation sweep failed");
+        }));
+    };
+    // Emit a periodic signal when the reaper inspects candidates but archives
+    // none, so an inert reaper that skips every candidate is never fully silent.
+    // The throttle keeps the 30s cadence from flooding the log.
+    let lastTerminalWorkspaceSkipLogAt = 0;
+    const terminalWorkspaceSkipLogIntervalMs = 10 * 60 * 1000;
+    const scheduleTerminalWorkspaceSweep = () => {
+      if (heartbeatSchedulerStopped) return;
+      trackHeartbeatSchedulerWork(terminalWorkspaces
+        .sweepTerminalWorkspaces()
+        .then((result) => {
+          if (result.archived > 0 || result.cleanupFailed > 0) {
+            logger.info(result, "terminal issue workspace reaper changed workspace state");
+            return;
+          }
+          const skipped =
+            result.skippedActiveRun
+            + result.skippedNonTerminalTree
+            + result.skippedUndelivered
+            + result.skippedRace;
+          const nowMs = Date.now();
+          if (skipped > 0 && nowMs - lastTerminalWorkspaceSkipLogAt >= terminalWorkspaceSkipLogIntervalMs) {
+            lastTerminalWorkspaceSkipLogAt = nowMs;
+            logger.info(result, "terminal issue workspace reaper skipped all candidates");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "terminal issue workspace reaper failed");
+        }));
+    };
+
+    // The restart-safe cleanup backstop for adapter login sessions. The
+    // in-process five-minute timer stays the primary control. This reaper runs
+    // on startup and on the scheduler interval. It deletes the login sandbox for
+    // any expired non-terminal session, retries the delete for any terminal
+    // session left in `cleanup_pending`, and deletes a tagged lease that no live
+    // session references.
+    const adapterLoginReaper = createCodexDeviceLoginReaper({
+      store: createDbAdapterAuthSessionStore(db as any),
+      runtime: createProductionLoginSessionReaperRuntime({
+        db: db as any,
+        environmentRuntime: environmentRuntimeService(db as any, { pluginWorkerManager }),
+      }),
+    });
+    const logAdapterLoginReaperResult = (
+      result: Awaited<ReturnType<typeof adapterLoginReaper.sweep>>,
+    ) => {
+      if (
+        result.expiredTimedOut > 0 ||
+        result.cleanupCleared > 0 ||
+        result.orphanLeasesDeleted > 0 ||
+        result.cleanupPendingRemaining > 0
+      ) {
+        logger.info(result, "adapter login reaper swept login sessions");
+      }
+    };
+    const scheduleAdapterLoginReaperSweep = () => {
+      if (heartbeatSchedulerStopped) return;
+      trackHeartbeatSchedulerWork(adapterLoginReaper
+        .sweep()
+        .then(logAdapterLoginReaperResult)
+        .catch((err) => {
+          logger.error({ err }, "adapter login reaper sweep failed");
+        }));
+    };
     const tools = toolAccessService(db as any, {
       deploymentMode: config.deploymentMode,
       deploymentExposure: config.deploymentExposure,
@@ -1047,14 +1186,45 @@ export async function startServer(): Promise<StartedServer> {
     }
     await decisionExecutor.sweepExpired();
 
-    heartbeatSchedulerInterval = setInterval(() => {
-      // Async so the suppression checks below can honor the override-aware
-      // resolver (e.g. worktree run-execution opt-in). The gated work is still
-      // wrapped in trackHeartbeatSchedulerWork with its own error handling.
-      void (async () => {
+    // Run the adapter login reaper once at startup, so a login sandbox that
+    // outlived a server restart is deleted before timer ticks start.
+    await adapterLoginReaper
+      .sweep()
+      .then(logAdapterLoginReaperResult)
+      .catch((err) => {
+        logger.error({ err }, "startup adapter login reaper sweep failed");
+      });
+
+    const runRetentionSweep = async () => {
+      const activeCompanies = await db.select({ id: companies.id }).from(companies).where(eq(companies.status, "active"));
+      let archived = 0;
+      for (const company of activeCompanies) {
+        // Cursor pagination rebuilds the whole feed for every page; one
+        // unscoped all-items build keeps this sweep at a single feed build
+        // per company per tick.
+        const page = await attentionService(db as any).list(company.id, {
+          includeDismissed: true,
+          all: true,
+          allowUnscopedAll: true,
+        });
+        archived += await retentionExecutor.autoArchive({ companyId: company.id, items: page.items });
+      }
+      const notifications = await retentionExecutor.deliverNotifications();
+      return { archived, ...notifications };
+    };
+    await runRetentionSweep();
+
+    startHeartbeatSchedulerInterval(() => {
+      // Track the outer async callback as well as the work it starts. Shutdown
+      // can then wait through an already-running suppression check before it
+      // captures the authoritative set of running heartbeat rows.
+      trackHeartbeatSchedulerWork((async () => {
         if (heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
           logger.error({ err }, "decision expiry sweep failed");
+        }));
+        trackHeartbeatSchedulerWork(runRetentionSweep().catch((err: unknown) => {
+          logger.error({ err }, "decision retention sweep failed");
         }));
         const sweptRuntimeStatuses = heartbeat.sweepExpiredRuntimeStatuses();
         if (sweptRuntimeStatuses > 0) {
@@ -1076,6 +1246,14 @@ export async function startServer(): Promise<StartedServer> {
               logger.error({ err }, "heartbeat timer tick failed");
             }));
         }
+
+        if (heartbeatSchedulerStopped) return;
+        scheduleExternalObjectRefreshSweep(new Date());
+
+        if (heartbeatSchedulerStopped) return;
+        scheduleMergedPullRequestConfirmationSweep();
+        scheduleTerminalWorkspaceSweep();
+        scheduleAdapterLoginReaperSweep();
 
         if (heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork(routines
@@ -1142,6 +1320,14 @@ export async function startServer(): Promise<StartedServer> {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
 
+        trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
+          .then((expired) => {
+            if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");
+          })
+          .catch((err) => {
+            logger.error({ err }, "periodic secret proposal expiry sweep failed");
+          }));
+
         if (heartbeatSchedulerStopped) return;
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
@@ -1200,8 +1386,14 @@ export async function startServer(): Promise<StartedServer> {
               logger.error({ err }, "periodic heartbeat recovery failed");
             }));
         }
-      })();
-    }, config.heartbeatSchedulerIntervalMs);
+      })().catch((err) => {
+        logger.error({ err }, "heartbeat scheduler tick failed");
+      }));
+    });
+  } else {
+    startHeartbeatSchedulerInterval(() => {
+      scheduleExternalObjectRefreshSweep(new Date());
+    });
   }
   
   if (config.databaseBackupEnabled) {
@@ -1319,10 +1511,11 @@ export async function startServer(): Promise<StartedServer> {
         waitForHeartbeatSchedulerIdle,
       });
       const skipHeartbeatDrain = heartbeatShutdown.hotRestart?.skipDrain === true;
+      const selectiveDrainRunIds = heartbeatShutdown.hotRestart?.drainRunIds ?? null;
       if (skipHeartbeatDrain) {
         logger.info(
           { signal, hotRestart: heartbeatShutdown.hotRestart },
-          "hot-restart shutdown prepared; skipping heartbeat scheduler idle wait and graceful run drain",
+          "hot-restart shutdown prepared after scheduler quiescence; skipping graceful run drain",
         );
       } else if (heartbeatShutdown.preparationError) {
         logger.error(
@@ -1339,7 +1532,7 @@ export async function startServer(): Promise<StartedServer> {
 
       if (!skipHeartbeatDrain && drainHeartbeatRunsForShutdown) {
         try {
-          const drain = await drainHeartbeatRunsForShutdown(signal);
+          const drain = await drainHeartbeatRunsForShutdown(signal, selectiveDrainRunIds);
           logger.info({ signal, drain }, "graceful heartbeat run drain complete");
         } catch (err) {
           logger.error({ err, signal }, "graceful heartbeat run drain failed");
