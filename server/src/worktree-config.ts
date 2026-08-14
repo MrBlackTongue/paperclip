@@ -360,14 +360,27 @@ const MAX_WRITE_DESTINATION_LINK_HOPS = 32;
  * from the root down, following symlinks whether or not their target exists.
  */
 function resolveWriteDestination(targetPath: string): string | null {
-  const absolute = path.resolve(targetPath);
-  let remainingSegments = splitAbsolutePath(absolute);
-  let resolvedPath = path.parse(absolute).root;
+  const targetRoot = path.parse(targetPath).root;
+  const cwd = process.cwd();
+  let remainingSegments = targetRoot
+    ? splitPathSegments(targetPath)
+    : [...splitPathSegments(cwd), ...splitPathSegments(targetPath)];
+  let resolvedPath = targetRoot || path.parse(cwd).root;
   let linkHops = 0;
 
   while (remainingSegments.length > 0) {
     const [segment, ...rest] = remainingSegments;
-    const candidate = path.resolve(resolvedPath, segment);
+    if (segment === ".") {
+      remainingSegments = rest;
+      continue;
+    }
+    if (segment === "..") {
+      resolvedPath = path.dirname(resolvedPath);
+      remainingSegments = rest;
+      continue;
+    }
+
+    const candidate = path.join(resolvedPath, segment);
     const linkTarget = readSymlinkTarget(candidate);
     if (!linkTarget) {
       resolvedPath = candidate;
@@ -378,17 +391,22 @@ function resolveWriteDestination(targetPath: string): string | null {
     linkHops += 1;
     if (linkHops > MAX_WRITE_DESTINATION_LINK_HOPS) return null;
 
-    const resolvedLinkTarget = path.resolve(path.dirname(candidate), linkTarget);
-    resolvedPath = path.parse(resolvedLinkTarget).root;
-    remainingSegments = [...splitAbsolutePath(resolvedLinkTarget), ...rest];
+    // Keep the target's path segments intact. Resolving the whole target here
+    // would collapse `escape/..` before `escape` itself had a chance to resolve
+    // as a symlink, producing a different destination from the filesystem.
+    const linkRoot = path.parse(linkTarget).root;
+    resolvedPath = linkRoot
+      ? path.resolve(path.dirname(candidate), linkRoot)
+      : path.dirname(candidate);
+    remainingSegments = [...splitPathSegments(linkTarget), ...rest];
   }
 
   return resolvedPath;
 }
 
-function splitAbsolutePath(absolutePath: string): string[] {
-  const root = path.parse(absolutePath).root;
-  return absolutePath.slice(root.length).split(path.sep).filter(Boolean);
+function splitPathSegments(targetPath: string): string[] {
+  const root = path.parse(targetPath).root;
+  return targetPath.slice(root.length).split(path.sep).filter(Boolean);
 }
 
 function readSymlinkTarget(targetPath: string): string | null {
