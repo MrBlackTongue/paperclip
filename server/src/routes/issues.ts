@@ -3849,7 +3849,7 @@ export function issueRoutes(
     }
     if (req.actor.type !== "agent") {
       const decision = await getIssueReadDecision(req, issue);
-      if (decision.allowed) return issue;
+      if (decision.allowed && decision.reason === "allow_issue_user_participation_grant") return issue;
     }
     res.status(404).json({ error: notFoundMessage });
     return null;
@@ -3886,7 +3886,7 @@ export function issueRoutes(
     }
     if (req.actor.type !== "agent") {
       const decision = await decideIssueAccess(req, issue, "issue:comment");
-      if (decision.allowed) return issue;
+      if (decision.allowed && decision.reason === "allow_issue_user_participation_grant") return issue;
     }
     res.status(404).json({ error: "Issue not found" });
     return null;
