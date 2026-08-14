@@ -1,6 +1,12 @@
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
+import {
+  executionWorkspaces,
+  heartbeatRuns,
+  issues,
+  projects,
+  projectWorkspaces,
+} from "@paperclipai/db";
 import type { ExecutionWorkspace, ExecutionWorkspaceCloseReadiness } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { logActivity, type LogActivityInput } from "./activity-log.js";
@@ -217,6 +223,26 @@ async function archiveSupersededSharedSessions(
   const svc = executionWorkspaceService(db);
   const now = input.now ?? new Date();
   const staleBefore = new Date(now.getTime() - SUPERSEDED_SHARED_SESSION_GRACE_MS);
+  const liveRunWorkspaces = await db
+    .select({
+      id: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'executionWorkspaceId'`,
+    })
+    .from(heartbeatRuns)
+    .where(
+      and(
+        eq(heartbeatRuns.companyId, input.companyId),
+        inArray(heartbeatRuns.status, ["queued", "running"]),
+        or(
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.sourceIssueId}`,
+          sql`${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${input.sourceIssueId}`,
+        ),
+      ),
+    );
+  const protectedWorkspaceIds = new Set(
+    liveRunWorkspaces
+      .map((row) => row.id)
+      .filter((id): id is string => Boolean(id)),
+  );
   const rows = await db
     .select({ id: executionWorkspaces.id })
     .from(executionWorkspaces)
@@ -232,6 +258,7 @@ async function archiveSupersededSharedSessions(
   const archivedIds: string[] = [];
   for (const row of rows) {
     if (input.keepWorkspaceId && row.id === input.keepWorkspaceId) continue;
+    if (protectedWorkspaceIds.has(row.id)) continue;
     const workspace = await svc.getById(row.id);
     if (!workspace) continue;
     try {

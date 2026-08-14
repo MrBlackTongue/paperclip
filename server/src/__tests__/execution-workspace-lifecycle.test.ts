@@ -8,9 +8,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   activityLog,
+  agents,
   companies,
   createDb,
   executionWorkspaces,
+  heartbeatRuns,
   issues,
   projectWorkspaces,
   projects,
@@ -55,10 +57,12 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
   afterEach(async () => {
     await db.delete(activityLog);
     await db.delete(workspaceOperations);
+    await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
+    await db.delete(agents);
     await db.delete(companies);
     for (const dir of tempDirs) {
       await fs.rm(dir, { recursive: true, force: true });
@@ -95,6 +99,7 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     }
 
     const companyId = randomUUID();
+    const agentId = randomUUID();
     const projectId = randomUUID();
     const projectWorkspaceId = randomUUID();
     const executionWorkspaceId = randomUUID();
@@ -103,6 +108,11 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       name: "Paperclip",
       issuePrefix: "PAP",
       requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Workspace lifecycle agent",
     });
     await db.insert(projects).values({
       id: projectId,
@@ -150,7 +160,7 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       executionWorkspaceId,
     })));
 
-    return { companyId, projectId, projectWorkspaceId, executionWorkspaceId, issueIds, worktreePath };
+    return { companyId, agentId, projectId, projectWorkspaceId, executionWorkspaceId, issueIds, worktreePath };
   }
 
   /** A shared session from an earlier run: same issue, own id, not referenced by the issue. */
@@ -340,6 +350,50 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     expect(await statusOf(stalePrior)).toBe("archived");
     expect(await statusOf(concurrent)).toBe("active");
     expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
+  }, 20_000);
+
+  it("keeps an aged shared session while a running heartbeat still references it", async () => {
+    const fixture = await createFixture(["in_review"], "shared_workspace");
+    const liveWorkspace = await insertPriorSharedSession(fixture, fixture.issueIds[0], {
+      lastUsedAt: new Date(Date.now() - 60 * 60_000),
+    });
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: fixture.companyId,
+      agentId: fixture.agentId,
+      status: "running",
+      startedAt: new Date(Date.now() - 60 * 60_000),
+      contextSnapshot: {
+        issueId: fixture.issueIds[0],
+        executionWorkspaceId: liveWorkspace,
+      },
+    });
+
+    const whileRunning = await lifecycle.archiveSupersededSharedSessionsForIssue({
+      companyId: fixture.companyId,
+      issueId: fixture.issueIds[0],
+      keepWorkspaceId: fixture.executionWorkspaceId,
+      actor,
+    });
+
+    expect(whileRunning).toEqual([]);
+    expect(await statusOf(liveWorkspace)).toBe("active");
+
+    await db
+      .update(heartbeatRuns)
+      .set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const afterFinish = await lifecycle.archiveSupersededSharedSessionsForIssue({
+      companyId: fixture.companyId,
+      issueId: fixture.issueIds[0],
+      keepWorkspaceId: fixture.executionWorkspaceId,
+      actor,
+    });
+
+    expect(afterFinish).toEqual([liveWorkspace]);
+    expect(await statusOf(liveWorkspace)).toBe("archived");
   }, 20_000);
 
   it("archives shared sessions of previous runs when the issue reaches a terminal status", async () => {
