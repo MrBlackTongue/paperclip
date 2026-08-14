@@ -597,6 +597,24 @@ describe("worktree config repair", () => {
     ).toBe(true);
   });
 
+  it("does not spend the symlink hop limit on ordinary path segments", async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-deep-symlink-"));
+    const worktreeRoot = path.join(tempRoot, "PAP-8101-deep-symlink");
+    const foreignRoot = path.join(tempRoot, "foreign-instance");
+    const linkedRoot = path.join(worktreeRoot, "linked-root");
+    const deepDestination = path.join(
+      linkedRoot,
+      ...Array.from({ length: 40 }, (_, index) => `segment-${index}`),
+      "config.json",
+    );
+
+    await markLinkedGitWorktree(worktreeRoot);
+    await fs.mkdir(foreignRoot, { recursive: true });
+    await fs.symlink(foreignRoot, linkedRoot);
+
+    expect(isWorktreeRepairWriteAllowed(worktreeRoot, deepDestination)).toBe(false);
+  });
+
   it("avoids sibling worktree ports when repairing legacy configs", async () => {
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-repair-ports-"));
     const worktreeRoot = path.join(tempRoot, "PAP-880-thumbs-capture-for-evals-feature");

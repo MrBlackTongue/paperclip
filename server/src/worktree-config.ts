@@ -343,7 +343,9 @@ export function isWorktreeRepairWriteAllowed(worktreeRoot: string, targetPath: s
   // checkout while the write follows the link and lands outside it. Compare the
   // resolved destination too, so a symlink cannot be used to overwrite external
   // configuration through worktree repair.
-  if (!isPathInside(resolveWriteDestination(targetPath), realPathOrSelf(worktreeRoot))) return false;
+  const resolvedDestination = resolveWriteDestination(targetPath);
+  if (!resolvedDestination) return false;
+  if (!isPathInside(resolvedDestination, realPathOrSelf(worktreeRoot))) return false;
   return isLinkedGitWorktreeCheckout(worktreeRoot);
 }
 
@@ -357,17 +359,36 @@ const MAX_WRITE_DESTINATION_LINK_HOPS = 32;
  * it still creates the file at the link target. So each segment is resolved
  * from the root down, following symlinks whether or not their target exists.
  */
-function resolveWriteDestination(targetPath: string, hops = 0): string {
+function resolveWriteDestination(targetPath: string): string | null {
   const absolute = path.resolve(targetPath);
-  if (hops >= MAX_WRITE_DESTINATION_LINK_HOPS) return absolute;
+  let remainingSegments = splitAbsolutePath(absolute);
+  let resolvedPath = path.parse(absolute).root;
+  let linkHops = 0;
 
-  const parent = path.dirname(absolute);
-  const resolvedParent = parent === absolute ? absolute : resolveWriteDestination(parent, hops + 1);
-  const candidate = path.resolve(resolvedParent, path.basename(absolute));
+  while (remainingSegments.length > 0) {
+    const [segment, ...rest] = remainingSegments;
+    const candidate = path.resolve(resolvedPath, segment);
+    const linkTarget = readSymlinkTarget(candidate);
+    if (!linkTarget) {
+      resolvedPath = candidate;
+      remainingSegments = rest;
+      continue;
+    }
 
-  const linkTarget = readSymlinkTarget(candidate);
-  if (!linkTarget) return candidate;
-  return resolveWriteDestination(path.resolve(path.dirname(candidate), linkTarget), hops + 1);
+    linkHops += 1;
+    if (linkHops > MAX_WRITE_DESTINATION_LINK_HOPS) return null;
+
+    const resolvedLinkTarget = path.resolve(path.dirname(candidate), linkTarget);
+    resolvedPath = path.parse(resolvedLinkTarget).root;
+    remainingSegments = [...splitAbsolutePath(resolvedLinkTarget), ...rest];
+  }
+
+  return resolvedPath;
+}
+
+function splitAbsolutePath(absolutePath: string): string[] {
+  const root = path.parse(absolutePath).root;
+  return absolutePath.slice(root.length).split(path.sep).filter(Boolean);
 }
 
 function readSymlinkTarget(targetPath: string): string | null {
