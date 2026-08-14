@@ -11924,11 +11924,8 @@ export function issueRoutes(
     const issueId = req.params.issueId as string;
     // Намеренно без assertCompanyAccess: доступ здесь даёт грант участия в цепочке
     // задачи, а не членство в компании — в этом и состоит смысл изменения.
-    const issue = await svc.getById(issueId);
-    if (!issue) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
-    }
+    const issue = await getCommentableIssue(req, res, issueId);
+    if (!issue) return;
     if (issue.companyId !== companyId) {
       res.status(422).json({ error: "Issue does not belong to company" });
       return;

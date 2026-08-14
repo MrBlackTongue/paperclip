@@ -1072,6 +1072,32 @@ describe("agent issue mutation checkout ownership", () => {
     }));
   });
 
+  it("hides attachment upload issue existence from a non-member without a participation grant", async () => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: false,
+      action: input.action,
+      reason: "deny_missing_membership",
+      explanation: "Missing membership.",
+    }));
+
+    const app = await createApp({
+      type: "board",
+      userId: "unrelated-user",
+      companyIds: [],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/issues/${issueId}/attachments`)
+      .attach("file", Buffer.from("report"), { filename: "qa.txt", contentType: "text/plain" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect(res.body.error).toBe("Issue not found");
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:comment" }));
+    expect(mockStorageService.putFile).not.toHaveBeenCalled();
+  });
+
   it("allows the checked-out owner with the matching run id to patch and update documents", async () => {
     const app = await createApp(ownerActor());
 
