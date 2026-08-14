@@ -1072,6 +1072,64 @@ describe("agent issue mutation checkout ownership", () => {
     }));
   });
 
+  it("allows user participation grants to read issue attachments without company membership", async () => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: input.action === "issue:read",
+      action: input.action,
+      reason: input.action === "issue:read" ? "allow_issue_user_participation_grant" : "deny_missing_membership",
+      explanation:
+        input.action === "issue:read"
+          ? "Allowed by an active issue user participation grant."
+          : "Missing membership.",
+    }));
+
+    const app = await createApp({
+      type: "board",
+      userId: "anna-user",
+      companyIds: [],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const attachments = await request(app).get(`/api/issues/${issueId}/attachments`);
+    const content = await request(app).get("/api/attachments/attachment-1/content");
+
+    expect(attachments.status, JSON.stringify(attachments.body)).toBe(200);
+    expect(attachments.body).toEqual([]);
+    expect(content.status).toBe(200);
+    expect(content.text).toBe("report");
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
+    expect(mockIssueService.listAttachments).toHaveBeenCalledWith(issueId);
+    expect(mockStorageService.getObject).toHaveBeenCalled();
+  });
+
+  it("hides issue attachments from non-members without a participation grant", async () => {
+    mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+      allowed: false,
+      action: input.action,
+      reason: "deny_missing_membership",
+      explanation: "Missing membership.",
+    }));
+
+    const app = await createApp({
+      type: "board",
+      userId: "unrelated-user",
+      companyIds: [],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const attachments = await request(app).get(`/api/issues/${issueId}/attachments`);
+    const content = await request(app).get("/api/attachments/attachment-1/content");
+
+    expect(attachments.status, JSON.stringify(attachments.body)).toBe(404);
+    expect(attachments.body.error).toBe("Issue not found");
+    expect(content.status, JSON.stringify(content.body)).toBe(404);
+    expect(content.body.error).toBe("Attachment not found");
+    expect(mockIssueService.listAttachments).not.toHaveBeenCalled();
+    expect(mockStorageService.getObject).not.toHaveBeenCalled();
+  });
+
   it("hides attachment upload issue existence from a non-member without a participation grant", async () => {
     mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
       allowed: false,
