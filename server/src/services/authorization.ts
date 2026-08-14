@@ -1889,6 +1889,26 @@ export function authorizationService(db: Db) {
       }
       if (!permissionKey) {
         if (input.action === "issue:comment" || input.action === "issue:mutate") {
+          const membership = await getActiveMembership(companyId, "user", input.actor.userId);
+          if (input.action === "issue:comment" && !membership) {
+            if (
+              input.resource.type === "issue" &&
+              input.resource.issueId &&
+              await userHasParticipationGrantOnIssue({
+                action: input.action,
+                companyId,
+                issueId: input.resource.issueId,
+                actorUserId: input.actor.userId,
+              })
+            ) {
+              return allowIssueUserParticipationGrant(input.action);
+            }
+            return deny({
+              action: input.action,
+              reason: "deny_missing_membership",
+              explanation: `user principal ${input.actor.userId} is not an active member of company ${companyId}.`,
+            });
+          }
           if (
             input.resource.type !== "issue" ||
             !input.resource.issueId ||
@@ -1902,7 +1922,6 @@ export function authorizationService(db: Db) {
               explanation: `No board permission mapping exists for ${input.action}.`,
             });
           }
-          const membership = await getActiveMembership(companyId, "user", input.actor.userId);
           if (membership && membership.membershipRole !== "viewer") {
             return allow({
               action: input.action,
@@ -1959,40 +1978,6 @@ export function authorizationService(db: Db) {
           }
           if (
             input.action === "issue:read" &&
-            input.resource.type === "issue" &&
-            input.resource.issueId &&
-            await userHasParticipationGrantOnIssue({
-              action: input.action,
-              companyId,
-              issueId: input.resource.issueId,
-              actorUserId: input.actor.userId,
-            })
-          ) {
-            return allowIssueUserParticipationGrant(input.action);
-          }
-          return deny({
-            action: input.action,
-            reason: "deny_missing_membership",
-            explanation: `user principal ${input.actor.userId} is not an active member of company ${companyId}.`,
-          });
-        }
-        if (input.action === "issue:comment") {
-          const membership = await getActiveMembership(companyId, "user", input.actor.userId);
-          if (membership && membership.membershipRole !== "viewer") {
-            return allow({
-              action: input.action,
-              reason: "allow_simple_company_member",
-              explanation: "Allowed by standard same-company board membership comment access.",
-            });
-          }
-          if (membership) {
-            return deny({
-              action: input.action,
-              reason: "deny_missing_grant",
-              explanation: `Viewer membership does not grant ${input.action}.`,
-            });
-          }
-          if (
             input.resource.type === "issue" &&
             input.resource.issueId &&
             await userHasParticipationGrantOnIssue({
