@@ -346,6 +346,8 @@ describe.sequential("agent cross-tenant route authorization", () => {
     resetMockDefaults();
   });
 
+  // This case boots the app once per protected route, so the default timeout
+  // is too short on cold CI runners and leaves shared mocks mutating afterward.
   it("enforces company boundaries before mutating or reading agent keys", async () => {
     const crossTenantActor = {
       type: "board",
@@ -418,7 +420,7 @@ describe.sequential("agent cross-tenant route authorization", () => {
     expect(res.body.error).toContain("Key not found");
     expect(mockAgentService.getKeyById).toHaveBeenCalledWith(keyId);
     expect(mockAgentService.revokeKey).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it("requires board access before clearing an agent error", async () => {
     const app = await createApp({
