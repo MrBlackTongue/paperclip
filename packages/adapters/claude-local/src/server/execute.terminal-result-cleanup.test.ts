@@ -107,6 +107,31 @@ describe("claude_local terminal-result cleanup exit code", () => {
     });
   });
 
+  it("treats a force-killed cleanup the same way", async () => {
+    // SIGKILL after the grace period only means the leftover background task
+    // ignored SIGTERM. Both signals land after the terminal result was parsed,
+    // so the turn is no less complete than in the SIGTERM case.
+    runAdapterExecutionTargetProcess.mockResolvedValue(
+      procResult({
+        exitCode: 137,
+        terminalResultCleanup: {
+          kind: "terminal_result_cleanup",
+          stopped: true,
+          stopReason: "unmanaged_background_task_stopped",
+          reason: "unmanaged background task stopped; no durable live path",
+          terminalResultSeen: true,
+          signal: "SIGKILL",
+          forceKilled: true,
+        },
+      }),
+    );
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errorMessage ?? null).toBeNull();
+  });
+
   it("still reports a non-zero exit code when the cleanup did not stop the run", async () => {
     runAdapterExecutionTargetProcess.mockResolvedValue(procResult({ terminalResultCleanup: null }));
 

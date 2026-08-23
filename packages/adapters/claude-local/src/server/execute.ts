@@ -1092,6 +1092,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // makes the heartbeat fail a run whose turn actually completed. Treat the
     // exit code as clean in that case; `parsedIsError` still decides whether
     // the turn itself failed.
+    //
+    // `forceKilled` is deliberately not part of the condition. It only records
+    // that the leftover background task ignored SIGTERM and had to be SIGKILLed
+    // after the grace period. Both signals land after the terminal result is
+    // already parsed, so neither says anything about the turn itself, and both
+    // exit codes are equally ours.
     const stoppedByTerminalResultCleanup =
       proc.terminalResultCleanup?.stopped === true &&
       proc.terminalResultCleanup.terminalResultSeen === true;
