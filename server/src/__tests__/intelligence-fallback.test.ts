@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FALLBACK_SOURCE_CONTEXT_KEY,
   type FallbackSourceSpec,
+  applyFallbackSourceToConfig,
   isSourceExhaustionFailure,
   readFallbackChain,
   readFallbackSourceOverride,
@@ -65,6 +66,39 @@ describe("readFallbackChain", () => {
     expect(readFallbackChain({ fallbackChain: "nope" })).toEqual([]);
     // Entries without an adapterType are dropped.
     expect(readFallbackChain({ fallbackChain: [{ model: "gpt" }, null, 42] })).toEqual([]);
+  });
+});
+
+describe("applyFallbackSourceToConfig", () => {
+  const base = {
+    model: "sonnet",
+    env: { CLAUDE_CODE_OAUTH_TOKEN: { type: "plain", value: "sub1" }, KEEP: { type: "plain", value: "x" } },
+  };
+
+  it("swaps the token while inheriting the rest of the env", () => {
+    const override = {
+      index: 1,
+      adapterType: "claude_local",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: { type: "plain", value: "sub2" } },
+    };
+    const out = applyFallbackSourceToConfig(base, override, "claude_local");
+    expect(out.env).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: { type: "plain", value: "sub2" },
+      KEEP: { type: "plain", value: "x" },
+    });
+    expect(out.model).toBe("sonnet"); // untouched when override omits it
+  });
+
+  it("overrides model/effort when the source specifies them", () => {
+    const out = applyFallbackSourceToConfig(base, { index: 1, adapterType: "claude_local", model: "opus", effort: "high" }, "claude_local");
+    expect(out.model).toBe("opus");
+    expect(out.effort).toBe("high");
+  });
+
+  it("leaves the config untouched with no override or a cross-adapter override", () => {
+    expect(applyFallbackSourceToConfig(base, null, "claude_local")).toBe(base);
+    // Cross-provider fallback is not applied via config overlay.
+    expect(applyFallbackSourceToConfig(base, { index: 1, adapterType: "codex_local" }, "claude_local")).toBe(base);
   });
 });
 

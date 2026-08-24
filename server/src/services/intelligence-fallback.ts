@@ -105,6 +105,30 @@ export function selectNextFallbackSource(
   return { index: nextChainPos + 1, ...next };
 }
 
+/**
+ * Overlay a same-provider fallback source's model/effort/env onto an adapter
+ * config for a retry. Returns the config unchanged when there is no override or
+ * the override targets a different adapter (cross-provider fallback is executed
+ * elsewhere, not by a config overlay). The override's env wins key-by-key, so a
+ * fallback source can swap the auth token (e.g. CLAUDE_CODE_OAUTH_TOKEN) while
+ * inheriting the rest of the agent's env.
+ */
+export function applyFallbackSourceToConfig(
+  config: Record<string, unknown>,
+  override: FallbackSourceOverride | null,
+  currentAdapterType: string,
+): Record<string, unknown> {
+  if (!override || override.adapterType !== currentAdapterType) return config;
+  const baseEnv = readOptionalObject(config.env) ?? {};
+  const next: Record<string, unknown> = { ...config };
+  if (override.model !== undefined) next.model = override.model;
+  if (override.effort !== undefined) next.effort = override.effort;
+  if (override.env && Object.keys(override.env).length > 0) {
+    next.env = { ...baseEnv, ...override.env };
+  }
+  return next;
+}
+
 /** Parse a persisted source override off a run's context snapshot, if present. */
 export function readFallbackSourceOverride(contextSnapshot: unknown): FallbackSourceOverride | null {
   const snapshot = readOptionalObject(contextSnapshot);
