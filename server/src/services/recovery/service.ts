@@ -3780,10 +3780,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     // Update issue and routine run atomically so a partial failure cannot leave the
     // issue cancelled while its linked run remains in a non-terminal state.
     const updated = await db.transaction(async (tx) => {
+      // Guard the cancellation on the status we observed while stranding the issue.
+      // A raw id-only update would bypass the locked lifecycle validation that normal
+      // issue mutations use and could clobber a concurrent operator transition (e.g. a
+      // board move to done/blocked) with "cancelled". Routine executions are one-shot
+      // firings with no retry budget, so there is no same-status "newer run" to race
+      // with here; if an operator has moved the card out of its stranded status this
+      // no-ops and the caller falls through to the normal validated path.
       const rows = await tx
         .update(issues)
         .set({ status: "cancelled", updatedAt: new Date() })
-        .where(eq(issues.id, input.issue.id))
+        .where(and(eq(issues.id, input.issue.id), eq(issues.status, input.previousStatus)))
         .returning();
       const updatedIssue = rows[0];
       if (!updatedIssue) return null;
