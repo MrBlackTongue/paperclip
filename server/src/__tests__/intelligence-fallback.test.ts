@@ -31,20 +31,28 @@ describe("isSourceExhaustionFailure", () => {
 });
 
 describe("selectNextFallbackSource", () => {
-  const chain = [claudeAlt, codex];
-
-  it("returns the first fallback after the default source runs", () => {
-    const next = selectNextFallbackSource(chain, 0);
+  it("returns the first same-provider fallback after the default source runs", () => {
+    const next = selectNextFallbackSource([claudeAlt, codex], 0, "claude_local");
     expect(next).toMatchObject({ index: 1, adapterType: "claude_local", label: "Claude sub #2" });
   });
 
-  it("advances to the next source on each subsequent exhaustion", () => {
-    expect(selectNextFallbackSource(chain, 1)).toMatchObject({ index: 2, adapterType: "codex_local" });
+  it("skips a deferred cross-provider entry to reach a later same-provider source", () => {
+    // Chain orders Codex (cross-provider, not runnable yet) BEFORE a second Claude
+    // subscription. Selection must jump past Codex to the reachable Claude sub at
+    // index 2 rather than stalling on the unsupported entry.
+    const next = selectNextFallbackSource([codex, claudeAlt], 0, "claude_local");
+    expect(next).toMatchObject({ index: 2, adapterType: "claude_local", label: "Claude sub #2" });
   });
 
-  it("returns null once the chain is exhausted", () => {
-    expect(selectNextFallbackSource(chain, 2)).toBeNull();
-    expect(selectNextFallbackSource([], 0)).toBeNull();
+  it("returns null when only cross-provider entries remain", () => {
+    // Codex-only chain from a Claude agent: nothing runnable, so the normal quota
+    // wait is left in place instead of a bogus switch.
+    expect(selectNextFallbackSource([codex], 0, "claude_local")).toBeNull();
+  });
+
+  it("returns null once the same-provider sources are exhausted", () => {
+    expect(selectNextFallbackSource([claudeAlt], 1, "claude_local")).toBeNull();
+    expect(selectNextFallbackSource([], 0, "claude_local")).toBeNull();
   });
 });
 

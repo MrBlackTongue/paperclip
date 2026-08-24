@@ -92,17 +92,29 @@ export function readFallbackChain(runtimeConfig: unknown): FallbackSourceSpec[] 
  * source that just ran (0 = the agent's default, 1 = first fallback, …). Returns
  * the next source with its 1-based chain position, or null when the chain is
  * exhausted. The chain is bounded (max 4), so this always terminates.
+ *
+ * Only same-provider sources (matching `currentAdapterType`) can be executed today
+ * — a cross-provider switch reworks session handling and is a deferred follow-up.
+ * So a cross-provider entry is SKIPPED, not stalled on: selection walks past it to
+ * the next same-provider source and returns that source's real chain position. This
+ * keeps a later supported subscription reachable even when a deferred cross-provider
+ * entry sits ahead of it in the chain.
  */
 export function selectNextFallbackSource(
   chain: FallbackSourceSpec[],
   attemptedSourceIndex: number,
+  currentAdapterType: string,
 ): FallbackSourceOverride | null {
   // chain[0] is the FIRST fallback, i.e. it serves attemptedSourceIndex 0 (the
-  // default). So the next source after attempt N lives at chain[N].
-  const nextChainPos = Math.max(0, attemptedSourceIndex);
-  const next = chain[nextChainPos];
-  if (!next) return null;
-  return { index: nextChainPos + 1, ...next };
+  // default). So the next source after attempt N lives at chain[N] onward.
+  for (let pos = Math.max(0, attemptedSourceIndex); pos < chain.length; pos++) {
+    const next = chain[pos];
+    // Skip a deferred cross-provider source and keep looking for a runnable one,
+    // so its 1-based index advances past the skipped entry on the next round too.
+    if (next.adapterType !== currentAdapterType) continue;
+    return { index: pos + 1, ...next };
+  }
+  return null;
 }
 
 /**

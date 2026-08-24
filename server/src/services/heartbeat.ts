@@ -11426,15 +11426,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // against it immediately instead of waiting out the reset window. The token
     // swap itself happens in executeRun, driven by the source stamped on the
     // retry's context. Cross-provider sources are stored but not switched here yet.
-    const nextFallbackSource =
+    const fallbackSource =
       transientRecovery?.errorFamily === "provider_quota"
         ? selectNextFallbackSource(
             readFallbackChain(agent.runtimeConfig),
             readFallbackSourceOverride(contextSnapshot)?.index ?? 0,
+            agent.adapterType,
           )
         : null;
-    const fallbackSource =
-      nextFallbackSource && nextFallbackSource.adapterType === agent.adapterType ? nextFallbackSource : null;
     const effectiveDueAt = fallbackSource ? now : schedule.dueAt;
     const fallbackSourceContext: Record<string, unknown> = fallbackSource
       ? { [FALLBACK_SOURCE_CONTEXT_KEY]: fallbackSource }

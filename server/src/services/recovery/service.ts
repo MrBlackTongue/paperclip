@@ -2757,14 +2757,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const quotaAgent = await getAgent(input.agentId);
     const currentSourceIndex =
       readFallbackSourceOverride(parseObject(input.latestRun?.contextSnapshot))?.index ?? 0;
-    const nextFallbackSource = selectNextFallbackSource(
+    // No agent (or no adapterType) → pass "" so nothing in the chain matches and
+    // selection returns null, leaving the normal quota wait in place.
+    const fallbackSource = selectNextFallbackSource(
       readFallbackChain(quotaAgent?.runtimeConfig),
       currentSourceIndex,
+      quotaAgent?.adapterType ?? "",
     );
-    const fallbackSource =
-      nextFallbackSource && quotaAgent && nextFallbackSource.adapterType === quotaAgent.adapterType
-        ? nextFallbackSource
-        : null;
     const retryAt = fallbackSource ? now : readProviderQuotaRetryAt(input.latestRun, now);
     const fallbackContext = fallbackSource
       ? { [FALLBACK_SOURCE_CONTEXT_KEY]: fallbackSource, retryReason: "provider_quota_fallback" }
