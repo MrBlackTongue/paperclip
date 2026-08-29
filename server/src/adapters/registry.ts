@@ -83,6 +83,8 @@ import {
   syncGrokSkills,
   testEnvironment as grokTestEnvironment,
   sessionCodec as grokSessionCodec,
+  GROK_DEVICE_LOGIN_COMMAND,
+  parseGrokDeviceLoginPrompt,
 } from "@paperclipai/adapter-grok-local/server";
 import {
   agentConfigurationDoc as grokAgentConfigurationDoc,
@@ -234,6 +236,24 @@ const codexLoginCapability: AdapterLoginCapability = {
   },
 };
 
+// The Grok interactive login capability. Grok runs `grok login --device-auth`
+// on a real pseudo-terminal, the same way Codex does. The flow shows a
+// one-time code that the user enters in the browser. The caller sets the
+// host-side timeout. The device-login flow writes its credential inside the
+// sandbox, so the capability declares no terminal credential capture and no
+// completion claim. `getCommand` is descriptive only: the login path selects
+// the real command from the closed key map in `login-command.ts`, never from
+// this member.
+const grokLoginCapability: AdapterLoginCapability = {
+  panelMode: "displayed_code",
+  timeoutPolicy: "caller_bounded",
+  getCommand: () => GROK_DEVICE_LOGIN_COMMAND,
+  parsePrompt: (output) => {
+    const prompt = parseGrokDeviceLoginPrompt(output);
+    return prompt ? { url: prompt.url, code: prompt.code } : null;
+  },
+};
+
 const claudeLocalAdapter: ServerAdapterModule = {
   type: "claude_local",
   execute: stampClaudeAgentIdHeader(claudeExecute),
@@ -339,6 +359,52 @@ const codexLocalAdapter: ServerAdapterModule = {
   loginCapability: codexLoginCapability,
 };
 
+const paperclipRunnerAdapter: ServerAdapterModule = {
+  type: "paperclip_runner",
+  async execute(ctx) {
+    const message = "paperclip_runner requires the native runner coordinator";
+    await ctx.onLog("stderr", `${message}\n`);
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: message,
+      errorCode: "paperclip_runner_coordinator_required",
+      provider: "codex",
+      summary: message,
+    };
+  },
+  async testEnvironment(context) {
+    const result = await codexTestEnvironment(context);
+    return { ...result, adapterType: "paperclip_runner" };
+  },
+  listSkills: listCodexSkills,
+  syncSkills: syncCodexSkills,
+  sessionCodec: codexSessionCodec,
+  models: codexModels,
+  listModels: listCodexModels,
+  refreshModels: refreshCodexModels,
+  supportsLocalAgentJwt: false,
+  supportsInstructionsBundle: false,
+  requiresMaterializedRuntimeSkills: false,
+  getRuntimeCommandSpec: (config) => buildNpmRuntimeCommandSpec(config, "codex", "@openai/codex"),
+  agentConfigurationDoc:
+    "# Paperclip Runner\n\nAdapter: paperclip_runner\n\nRuns Codex through the Rust Paperclip runner and authenticated PRP transport.\n",
+  getConfigSchema: () => ({
+    fields: [
+      {
+        key: "provider",
+        label: "Provider",
+        type: "select",
+        default: "codex",
+        options: [{ value: "codex", label: "Codex" }],
+        hint: "Paperclip Runner currently supports only Codex app-server.",
+      },
+    ],
+  }),
+  loginCapability: codexLoginCapability,
+};
+
 const cursorLocalAdapter: ServerAdapterModule = {
   type: "cursor",
   execute: cursorExecute,
@@ -420,6 +486,7 @@ const grokLocalAdapter: ServerAdapterModule = {
     installCommand: null,
   }),
   agentConfigurationDoc: grokAgentConfigurationDoc,
+  loginCapability: grokLoginCapability,
 };
 
 const kimiLocalAdapter: ServerAdapterModule = {
@@ -518,6 +585,7 @@ function registerBuiltInAdapters() {
     acpxLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
+    paperclipRunnerAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,
     cursorCloudAdapter,

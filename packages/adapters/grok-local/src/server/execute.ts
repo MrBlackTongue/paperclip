@@ -34,12 +34,13 @@ import {
   renderTemplate,
   renderPaperclipWakePrompt,
   isPaperclipRecoveryWakePayload,
-  resolvePaperclipDesiredSkillNames,
+  resolveLegacyPaperclipDesiredSkillNames,
   stringifyPaperclipWakePayload,
   refreshPaperclipWorkspaceEnvForExecution,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
+import { resolveManagedGrokHomeDir } from "./grok-home.js";
 import { isGrokUnknownSessionError, parseGrokJsonl } from "./parse.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -233,7 +234,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
 
   const grokSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
-  const desiredGrokSkillNames = resolvePaperclipDesiredSkillNames(config, grokSkillEntries);
+  const desiredGrokSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, grokSkillEntries);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
@@ -296,6 +297,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     });
     if (authToken) {
       env.PAPERCLIP_API_KEY = authToken;
+    }
+    // Subscription mode (no XAI_API_KEY): point the run at the company-scoped
+    // Grok home a completed device login wrote. Leaves the API-key path below
+    // (`resolveBillingType`) unchanged when the key exists.
+    if (!hasNonEmptyEnvValue(env, "XAI_API_KEY") && !hasNonEmptyEnvValue(process.env as Record<string, string>, "XAI_API_KEY")) {
+      env.GROK_HOME = resolveManagedGrokHomeDir(process.env, agent.companyId);
     }
 
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(

@@ -1,4 +1,12 @@
 export { decisionEffectTargetIssueIds } from "./decision.js";
+export {
+  NATIVE_FINALIZATION_SCHEMA,
+  type NativeFinalizationResult,
+  type NativeFinalizationResultV1,
+  type NativeReportedWorkDisposition,
+  type NativeRuntimeMode,
+  type NativeRunTerminalState,
+} from "./native-finalization.js";
 export type {
   Company,
   InteractionResolverGovernance,
@@ -279,6 +287,8 @@ export type {
   AdapterEnvironmentTestStatus,
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestResult,
+  AdapterAuthSignal,
+  AdapterAuthSignalResponse,
   AdapterAuthSessionStatus,
   AdapterAuthSessionInternalStatus,
   AdapterAuthSessionFailure,
@@ -684,6 +694,9 @@ export type {
   SuggestTasksResult,
   AskUserQuestionsQuestionOption,
   AskUserQuestionsQuestion,
+  PaperclipQuestionSetOption,
+  PaperclipQuestionSetQuestion,
+  PaperclipQuestionSetPayload,
   AskUserQuestionsPayload,
   AskUserQuestionsAnswer,
   AskUserQuestionsResult,
