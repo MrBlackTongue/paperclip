@@ -569,6 +569,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const routineId = randomUUID();
     const routineRunId = randomUUID();
     const executionIssueId = randomUUID();
+    const failedExecutionRunId = randomUUID();
     await db.insert(routines).values({
       id: routineId,
       companyId,
@@ -582,6 +583,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       source: "schedule",
       status: "dispatched",
     });
+    await seedHeartbeatRun({
+      companyId,
+      agentId: coderId,
+      runId: failedExecutionRunId,
+      issueId: executionIssueId,
+      status: "failed",
+    });
     await db.insert(issues).values({
       id: executionIssueId,
       companyId,
@@ -594,6 +602,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       originKind: "routine_execution",
       originId: routineId,
       originRunId: routineRunId,
+      executionRunId: failedExecutionRunId,
     });
     const [executionIssue] = await db.select().from(issues).where(eq(issues.id, executionIssueId));
 
@@ -604,7 +613,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       issue: executionIssue!,
       previousStatus: "in_progress",
       latestRun: {
-        id: randomUUID(),
+        id: failedExecutionRunId,
         agentId: coderId,
         status: "failed",
         error: "ACP turn failed",
@@ -617,6 +626,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
 
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, executionIssueId));
     expect(updatedIssue?.status).toBe("cancelled");
+    expect(updatedIssue?.executionRunId).toBeNull();
 
     const [updatedRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, routineRunId));
     expect(updatedRun?.status).toBe("failed");
@@ -629,6 +639,80 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .where(eq(issueRecoveryActions.sourceIssueId, executionIssueId));
     expect(actionRows).toHaveLength(0);
     expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel a routine execution after a newer same-status run is attached", async () => {
+    const { companyId, coderId, prefix } = await seedCompany();
+    const routineId = randomUUID();
+    const routineRunId = randomUUID();
+    const executionIssueId = randomUUID();
+    const failedExecutionRunId = randomUUID();
+    const replacementRunId = randomUUID();
+    await db.insert(routines).values({
+      id: routineId,
+      companyId,
+      title: "Daily infrastructure check",
+      assigneeAgentId: coderId,
+    });
+    await db.insert(routineRuns).values({
+      id: routineRunId,
+      companyId,
+      routineId,
+      source: "schedule",
+      status: "dispatched",
+    });
+    await seedHeartbeatRun({
+      companyId,
+      agentId: coderId,
+      runId: failedExecutionRunId,
+      issueId: executionIssueId,
+      status: "failed",
+    });
+    await seedHeartbeatRun({
+      companyId,
+      agentId: coderId,
+      runId: replacementRunId,
+      issueId: executionIssueId,
+      status: "queued",
+    });
+    await db.insert(issues).values({
+      id: executionIssueId,
+      companyId,
+      title: "Daily infrastructure check — 2026-07-28",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: coderId,
+      issueNumber: 3,
+      identifier: `${prefix}-3`,
+      originKind: "routine_execution",
+      originId: routineId,
+      originRunId: routineRunId,
+      executionRunId: failedExecutionRunId,
+    });
+    const [staleIssue] = await db.select().from(issues).where(eq(issues.id, executionIssueId));
+    await db.update(issues).set({ executionRunId: replacementRunId }).where(eq(issues.id, executionIssueId));
+
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(async () => null) });
+    await recovery.escalateStrandedAssignedIssue({
+      issue: staleIssue!,
+      previousStatus: "in_progress",
+      latestRun: {
+        id: failedExecutionRunId,
+        agentId: coderId,
+        status: "failed",
+        error: "ACP turn failed",
+        errorCode: "acpx_turn_failed",
+        contextSnapshot: { retryReason: "issue_continuation_needed" },
+        livenessState: "needs_followup",
+      } as never,
+      comment: "Automatic continuation recovery failed.",
+    });
+
+    const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, executionIssueId));
+    expect(updatedIssue?.status).toBe("in_progress");
+    expect(updatedIssue?.executionRunId).toBe(replacementRunId);
+    const [updatedRoutineRun] = await db.select().from(routineRuns).where(eq(routineRuns.id, routineRunId));
+    expect(updatedRoutineRun?.status).toBe("dispatched");
   });
 
   it("still blocks a routine execution whose failure is not transient infrastructure", async () => {

@@ -3263,18 +3263,32 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
     // Update issue and routine run atomically so a partial failure cannot leave the
     // issue cancelled while its linked run remains in a non-terminal state.
-    const updated = await db.transaction(async (tx) => {
-      // Guard the cancellation on the status we observed while stranding the issue.
-      // A raw id-only update would bypass the locked lifecycle validation that normal
-      // issue mutations use and could clobber a concurrent operator transition (e.g. a
-      // board move to done/blocked) with "cancelled". Routine executions are one-shot
-      // firings with no retry budget, so there is no same-status "newer run" to race
-      // with here; if an operator has moved the card out of its stranded status this
-      // no-ops and the caller falls through to the normal validated path.
+    const transition = await db.transaction(async (tx) => {
+      // Lock and compare the execution identity as well as status. A replacement
+      // wake can attach a newer run while leaving the issue `in_progress`; a
+      // status-only update would then cancel live work based on the stale failed
+      // run. Any changed checkout/execution pointer makes this recovery attempt
+      // leave the current path untouched.
+      const locked = await issuesSvc.getByIdForUpdate(input.issue.id, tx);
+      if (!locked) return null;
+      if (
+        locked.status !== input.previousStatus ||
+        locked.checkoutRunId !== input.issue.checkoutRunId ||
+        locked.executionRunId !== input.issue.executionRunId
+      ) {
+        return { kind: "stale" as const, issue: locked };
+      }
       const rows = await tx
         .update(issues)
-        .set({ status: "cancelled", updatedAt: new Date() })
-        .where(and(eq(issues.id, input.issue.id), eq(issues.status, input.previousStatus)))
+        .set({
+          status: "cancelled",
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(issues.id, input.issue.id))
         .returning();
       const updatedIssue = rows[0];
       if (!updatedIssue) return null;
@@ -3295,9 +3309,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             ),
           );
       }
-      return updatedIssue;
+      return { kind: "cancelled" as const, issue: updatedIssue };
     });
-    if (!updated) return null;
+    if (!transition) return null;
+    if (transition.kind === "stale") return transition.issue;
+    const updated = transition.issue;
 
     await issuesSvc.addComment(
       input.issue.id,
