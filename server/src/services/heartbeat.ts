@@ -28,6 +28,7 @@ import {
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
+  isResponsibleUserDenialCode,
   envBindingSchema,
   isEnvironmentDriverSupportedForAdapter,
   isToolConnectionAttentionHealth,
@@ -345,6 +346,7 @@ import {
   buildConfigurationIncompleteRecoveryNoticeSeed,
   buildExecutionReviewParticipantRecoveryNoticeSeed,
   buildImmediateExecutionPathRecoveryNoticeSeed,
+  buildResponsibleUserDenialRecoveryNoticeSeed,
   buildWorkspaceValidationRecoveryNoticeSeed,
 } from "./recovery/stranded-notice.js";
 import { withRecoveryContext } from "./recovery/status-only-context.js";
@@ -12057,7 +12059,8 @@ export function heartbeatService(
     // and queue nothing.
     if (
       run.errorCode != null &&
-      PRE_ADAPTER_SETUP_FAILURE_CODES.has(run.errorCode)
+      (PRE_ADAPTER_SETUP_FAILURE_CODES.has(run.errorCode) ||
+        isResponsibleUserDenialCode(run.errorCode))
     ) {
       if (run.issueCommentStatus !== "not_applicable") {
         await patchRunIssueCommentStatus(run.id, {
@@ -21041,8 +21044,12 @@ export function heartbeatService(
         }
         let outcome: RunSessionOutcome;
         const latestRun = await getRun(run.id);
+        const recordedResponsibleUserDenialCode =
+          normalizeResponsibleUserDenialCode(latestRun?.errorCode);
         if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
           outcome = latestRun.status;
+        } else if (recordedResponsibleUserDenialCode) {
+          outcome = "failed";
         } else if (adapterResult.nativeFinalization) {
           const nativeTerminal =
             adapterResult.nativeFinalization.terminal.runTerminalState;
@@ -21092,8 +21099,6 @@ export function heartbeatService(
                     (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
                   currentUserRedactionOptions,
                 );
-        const recordedResponsibleUserDenialCode =
-          normalizeResponsibleUserDenialCode(latestRun?.errorCode);
         const runErrorCode =
           outcome === "timed_out"
             ? "timeout"
@@ -22864,6 +22869,7 @@ export function heartbeatService(
       const shouldBlockImmediately =
         !recoveryAgentInvokable ||
         !recoveryAgent ||
+        isResponsibleUserDenialCode(run.errorCode) ||
         isWorkspaceValidationFailedRun(run) ||
         isConfigurationIncompleteFailedRun(run) ||
         didAutomaticRecoveryFail(
@@ -22876,13 +22882,20 @@ export function heartbeatService(
         const workspaceValidationFailure = isWorkspaceValidationFailedRun(run);
         const configurationIncompleteFailure =
           isConfigurationIncompleteFailedRun(run);
+        const responsibleUserDenialCode = normalizeResponsibleUserDenialCode(
+          run.errorCode,
+        );
         const notice = workspaceValidationFailure
           ? buildWorkspaceValidationRecoveryNoticeSeed()
           : configurationIncompleteFailure
             ? buildConfigurationIncompleteRecoveryNoticeSeed()
-            : buildImmediateExecutionPathRecoveryNoticeSeed({
-                status: issue.status as "todo" | "in_progress",
-              });
+            : responsibleUserDenialCode
+              ? buildResponsibleUserDenialRecoveryNoticeSeed(
+                  responsibleUserDenialCode,
+                )
+              : buildImmediateExecutionPathRecoveryNoticeSeed({
+                  status: issue.status as "todo" | "in_progress",
+                });
         return {
           kind: "blocked" as const,
           issue,

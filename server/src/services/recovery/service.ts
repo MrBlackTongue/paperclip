@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNull, notInArray, or, sql } fro
 import type { Db } from "@paperclipai/db";
 import {
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
+  RESPONSIBLE_USER_DENIAL_CODES,
   ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
   type IssueCommentMetadata,
   type IssueCommentPresentation,
@@ -369,6 +370,7 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
 ]);
 
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
+  ...RESPONSIBLE_USER_DENIAL_CODES,
   "agent_not_invokable",
   "agent_not_found",
   "budget_blocked",

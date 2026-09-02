@@ -1325,6 +1325,79 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(agent).toEqual({ status: "running", errorReason: null });
   });
 
+  it.each([
+    "RESPONSIBLE_USER_UNAUTHORIZED",
+    "RESPONSIBLE_USER_UNAVAILABLE",
+  ] as const)(
+    "fails closed on a recorded %s denial and creates one recovery action without a continuation retry",
+    async (errorCode) => {
+      const { companyId, agentId, issueId, runId } = await seedQueuedIssueRunFixture();
+      mockAdapterExecute.mockImplementationOnce(async () => {
+        await db
+          .update(heartbeatRuns)
+          .set({ errorCode, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, runId));
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          errorMessage: null,
+          summary: "Stopped after the responsible-user authorization denial.",
+          provider: "test",
+          model: "test-model",
+        };
+      });
+      const heartbeat = heartbeatService(db);
+
+      await heartbeat.resumeQueuedRuns();
+      await waitForRunToSettle(heartbeat, runId);
+      await heartbeat.waitForRunExecutionDrain(runId);
+
+      const settledRun = await heartbeat.getRun(runId);
+      expect(settledRun).toMatchObject({ status: "failed", errorCode });
+
+      const recoveryActions = await db
+        .select()
+        .from(issueRecoveryActions)
+        .where(and(
+          eq(issueRecoveryActions.companyId, companyId),
+          eq(issueRecoveryActions.sourceIssueId, issueId),
+        ));
+      expect(recoveryActions).toHaveLength(1);
+      expect(recoveryActions[0]).toMatchObject({
+        status: "active",
+        cause: "stranded_assigned_issue",
+      });
+
+      const sourceIssue = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      expect(sourceIssue?.status).toBe("blocked");
+
+      const comments = await db
+        .select()
+        .from(issueComments)
+        .where(eq(issueComments.issueId, issueId));
+      const denialNotices = comments.filter((comment) =>
+        String(comment.body).includes("stopped automatic retries")
+      );
+      expect(denialNotices).toHaveLength(1);
+      expect(denialNotices[0]?.body).toContain(`\`${errorCode}\``);
+
+      const runs = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.agentId, agentId));
+      expect(runs).toHaveLength(1);
+      expect(runs.some((candidate) =>
+        (candidate.contextSnapshot as Record<string, unknown> | null)?.retryReason ===
+          "issue_continuation_needed"
+      )).toBe(false);
+    },
+  );
+
   it("keeps a local run active when the recorded pid is still alive", async () => {
     const child = spawnAliveProcess();
     childProcesses.add(child);

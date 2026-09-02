@@ -112,7 +112,13 @@ describe("errorHandler", () => {
     expect(res.__errorContext).toBeUndefined();
   });
 
-  it("records responsible-user denial codes on the active agent run", () => {
+  it("records responsible-user denial codes before sending the response", async () => {
+    let resolveRecord!: (value: null) => void;
+    recordResponsibleUserDenialOnActiveRunMock.mockImplementationOnce(
+      () => new Promise<null>((resolve) => {
+        resolveRecord = resolve;
+      }),
+    );
     const db = { marker: "db" };
     const req = {
       ...makeReq(),
@@ -131,7 +137,13 @@ describe("errorHandler", () => {
       code: "RESPONSIBLE_USER_UNAUTHORIZED",
     });
 
-    errorHandler(err, req, res, next);
+    const handling = errorHandler(err, req, res, next);
+
+    await Promise.resolve();
+    expect(res.status).not.toHaveBeenCalled();
+
+    resolveRecord(null);
+    await handling;
 
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith({

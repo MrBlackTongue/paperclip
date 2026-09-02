@@ -66,15 +66,20 @@ function recordResponsibleUserDenialFromHttpError(
   req: Request,
   details: Record<string, unknown> | null,
 ) {
-  if (req.actor?.type !== "agent") return;
+  if (req.actor?.type !== "agent") return null;
   const db = getPaperclipDb(req);
-  if (!db) return;
+  if (!db) return null;
 
-  void recordResponsibleUserDenialOnActiveRun(db, {
+  const code = details?.code;
+  if (code !== "RESPONSIBLE_USER_UNAUTHORIZED" && code !== "RESPONSIBLE_USER_UNAVAILABLE") {
+    return null;
+  }
+
+  return recordResponsibleUserDenialOnActiveRun(db, {
     runId: req.actor.runId ?? null,
     agentId: req.actor.agentId ?? null,
     companyId: req.actor.companyId ?? null,
-    code: details?.code,
+    code,
   }).catch((recordErr) => {
     logger.warn(
       {
@@ -87,7 +92,7 @@ function recordResponsibleUserDenialFromHttpError(
   });
 }
 
-export function errorHandler(
+export async function errorHandler(
   err: unknown,
   req: Request,
   res: Response,
@@ -111,7 +116,8 @@ export function errorHandler(
       "standing_delegation_required",
       "grant_owner_membership_inactive",
     ]).has(typeof details?.code === "string" ? details.code : "");
-    recordResponsibleUserDenialFromHttpError(req, details);
+    const denialRecording = recordResponsibleUserDenialFromHttpError(req, details);
+    if (denialRecording) await denialRecording;
     if (err.status >= 500) {
       attachErrorContext(
         req,
