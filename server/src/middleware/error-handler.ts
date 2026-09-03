@@ -62,26 +62,31 @@ function getPaperclipDb(req: Request): Db | null {
   return locals?.paperclipDb ?? locals?.db ?? null;
 }
 
-function recordResponsibleUserDenialFromHttpError(
+type ResponsibleUserDenialRecording = "not_applicable" | "recorded" | "failed";
+
+async function recordResponsibleUserDenialFromHttpError(
   req: Request,
   details: Record<string, unknown> | null,
-) {
-  if (req.actor?.type !== "agent") return null;
+): Promise<ResponsibleUserDenialRecording> {
+  if (req.actor?.type !== "agent") return "not_applicable";
   const db = getPaperclipDb(req);
-  if (!db) return null;
+  if (!db) return "not_applicable";
 
   const code = details?.code;
   if (code !== "RESPONSIBLE_USER_UNAUTHORIZED" && code !== "RESPONSIBLE_USER_UNAVAILABLE") {
-    return null;
+    return "not_applicable";
   }
 
-  return recordResponsibleUserDenialOnActiveRun(db, {
-    runId: req.actor.runId ?? null,
-    agentId: req.actor.agentId ?? null,
-    companyId: req.actor.companyId ?? null,
-    code,
-  }).catch((recordErr) => {
-    logger.warn(
+  try {
+    await recordResponsibleUserDenialOnActiveRun(db, {
+      runId: req.actor.runId ?? null,
+      agentId: req.actor.agentId ?? null,
+      companyId: req.actor.companyId ?? null,
+      code,
+    });
+    return "recorded";
+  } catch (recordErr) {
+    logger.error(
       {
         err: recordErr,
         runId: req.actor?.runId ?? null,
@@ -89,7 +94,8 @@ function recordResponsibleUserDenialFromHttpError(
       },
       "failed to record responsible-user denial on heartbeat run",
     );
-  });
+    return "failed";
+  }
 }
 
 export async function errorHandler(
@@ -116,8 +122,19 @@ export async function errorHandler(
       "standing_delegation_required",
       "grant_owner_membership_inactive",
     ]).has(typeof details?.code === "string" ? details.code : "");
-    const denialRecording = recordResponsibleUserDenialFromHttpError(req, details);
-    if (denialRecording) await denialRecording;
+    const denialRecording = await recordResponsibleUserDenialFromHttpError(req, details);
+    if (denialRecording === "failed") {
+      // The denial itself is non-retryable, but nothing durable now records it.
+      // Answering with the plain 403 would let the adapter treat the call as a
+      // handled client error and finish the run cleanly, which is exactly the
+      // state that lets continuation recovery restart the same denial loop.
+      // Fail the request instead so the run cannot finalize as `succeeded`.
+      res.status(503).json({
+        error: err.message,
+        code: "responsible_user_denial_not_recorded",
+      });
+      return;
+    }
     if (err.status >= 500) {
       attachErrorContext(
         req,

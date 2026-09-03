@@ -158,4 +158,32 @@ describe("errorHandler", () => {
       code: "RESPONSIBLE_USER_UNAUTHORIZED",
     });
   });
+
+  it("fails the request when the responsible-user denial cannot be recorded", async () => {
+    recordResponsibleUserDenialOnActiveRunMock.mockRejectedValueOnce(new Error("db down"));
+    const req = {
+      ...makeReq(),
+      app: { locals: { paperclipDb: { marker: "db" } } },
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        runId: "run-1",
+        source: "agent_jwt",
+      },
+    } as unknown as Request;
+    const res = makeRes();
+    const next = vi.fn() as unknown as NextFunction;
+    const err = new HttpError(403, "Responsible user is not authorized", {
+      code: "RESPONSIBLE_USER_UNAUTHORIZED",
+    });
+
+    await errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Responsible user is not authorized",
+      code: "responsible_user_denial_not_recorded",
+    });
+  });
 });
