@@ -4,9 +4,11 @@ import { HttpError } from "../errors.js";
 import { errorHandler } from "../middleware/error-handler.js";
 
 const recordResponsibleUserDenialOnActiveRunMock = vi.hoisted(() => vi.fn());
+const failRunAfterUnrecordedResponsibleUserDenialMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/responsible-user-denial-run-outcomes.js", () => ({
   recordResponsibleUserDenialOnActiveRun: recordResponsibleUserDenialOnActiveRunMock,
+  failRunAfterUnrecordedResponsibleUserDenial: failRunAfterUnrecordedResponsibleUserDenialMock,
 }));
 
 function makeReq(): Request {
@@ -32,6 +34,8 @@ describe("errorHandler", () => {
   beforeEach(() => {
     recordResponsibleUserDenialOnActiveRunMock.mockReset();
     recordResponsibleUserDenialOnActiveRunMock.mockResolvedValue(null);
+    failRunAfterUnrecordedResponsibleUserDenialMock.mockReset();
+    failRunAfterUnrecordedResponsibleUserDenialMock.mockResolvedValue(null);
   });
 
   it("attaches the original Error to res.err for 500s", () => {
@@ -187,6 +191,66 @@ describe("errorHandler", () => {
     });
   });
 
+  it("fails the run itself when the denial write throws", async () => {
+    recordResponsibleUserDenialOnActiveRunMock.mockRejectedValueOnce(new Error("db down"));
+    const db = { marker: "db" };
+    const req = {
+      ...makeReq(),
+      app: { locals: { paperclipDb: db } },
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        runId: "run-1",
+        source: "agent_jwt",
+      },
+    } as unknown as Request;
+    const res = makeRes();
+    const next = vi.fn() as unknown as NextFunction;
+    const err = new HttpError(403, "Responsible user is not authorized", {
+      code: "RESPONSIBLE_USER_UNAUTHORIZED",
+    });
+
+    await errorHandler(err, req, res, next);
+
+    expect(failRunAfterUnrecordedResponsibleUserDenialMock).toHaveBeenCalledWith(db, {
+      runId: "run-1",
+      agentId: "agent-1",
+      companyId: "company-1",
+      code: "RESPONSIBLE_USER_UNAUTHORIZED",
+    });
+    expect(res.status).toHaveBeenCalledWith(503);
+  });
+
+  it("still answers 503 when the fallback run failure also throws", async () => {
+    recordResponsibleUserDenialOnActiveRunMock.mockRejectedValueOnce(new Error("db down"));
+    failRunAfterUnrecordedResponsibleUserDenialMock.mockRejectedValueOnce(new Error("db still down"));
+    const req = {
+      ...makeReq(),
+      app: { locals: { paperclipDb: { marker: "db" } } },
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        runId: "run-1",
+        source: "agent_jwt",
+      },
+    } as unknown as Request;
+    const res = makeRes();
+    const next = vi.fn() as unknown as NextFunction;
+    const err = new HttpError(403, "Responsible user is not authorized", {
+      code: "RESPONSIBLE_USER_UNAUTHORIZED",
+    });
+
+    await errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Responsible user is not authorized",
+      code: "responsible_user_denial_not_recorded",
+    });
+  });
+
   it("fails the request when no active run matched the denial", async () => {
     recordResponsibleUserDenialOnActiveRunMock.mockResolvedValueOnce(null);
     const req = {
@@ -208,6 +272,7 @@ describe("errorHandler", () => {
 
     await errorHandler(err, req, res, next);
 
+    expect(failRunAfterUnrecordedResponsibleUserDenialMock).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(503);
     expect(res.json).toHaveBeenCalledWith({
       error: "Responsible user is not authorized",

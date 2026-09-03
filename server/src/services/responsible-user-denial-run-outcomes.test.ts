@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
+  failRunAfterUnrecordedResponsibleUserDenial,
   normalizeResponsibleUserDenialCode,
   recordResponsibleUserDenialOnActiveRun,
 } from "./responsible-user-denial-run-outcomes.js";
@@ -87,6 +88,53 @@ describe("responsible-user denial run outcomes", () => {
       code: "access_denied",
     });
 
+    expect(update).not.toHaveBeenCalled();
+  });
+  it("takes the run out of the live statuses when its denial stayed unrecorded", async () => {
+    publishLiveEventMock.mockReset();
+    const row = {
+      id: "run-1",
+      companyId: "company-1",
+      agentId: "agent-1",
+      status: "failed",
+      invocationSource: "on_demand",
+      triggerDetail: null,
+      error: "responsible-user denial RESPONSIBLE_USER_UNAVAILABLE could not be recorded on this run",
+      errorCode: "RESPONSIBLE_USER_UNAVAILABLE",
+      startedAt: null,
+      finishedAt: new Date("2026-07-02T10:05:00.000Z"),
+    };
+    const { db, update, set } = makeDbReturning(row);
+
+    const updated = await failRunAfterUnrecordedResponsibleUserDenial(db, {
+      runId: "run-1",
+      agentId: "agent-1",
+      companyId: "company-1",
+      code: "RESPONSIBLE_USER_UNAVAILABLE",
+    });
+
+    expect(updated).toBe(row);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({
+      status: "failed",
+      errorCode: "RESPONSIBLE_USER_UNAVAILABLE",
+      finishedAt: expect.any(Date),
+    }));
+    expect(publishLiveEventMock).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: "company-1",
+      type: "heartbeat.run.status",
+    }));
+  });
+
+  it("does not fail a run when there is no run id to fail", async () => {
+    const { db, update } = makeDbReturning(null);
+
+    const updated = await failRunAfterUnrecordedResponsibleUserDenial(db, {
+      runId: "   ",
+      code: "RESPONSIBLE_USER_UNAVAILABLE",
+    });
+
+    expect(updated).toBeNull();
     expect(update).not.toHaveBeenCalled();
   });
 });

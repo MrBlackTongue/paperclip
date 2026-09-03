@@ -8,6 +8,7 @@ import { captureException } from "../sentry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
 import { logger } from "./logger.js";
 import {
+  failRunAfterUnrecordedResponsibleUserDenial,
   recordResponsibleUserDenialOnActiveRun,
 } from "../services/responsible-user-denial-run-outcomes.js";
 
@@ -111,14 +112,31 @@ async function recordResponsibleUserDenialFromHttpError(
     );
     return "failed";
   } catch (recordErr) {
+    const agentId = req.actor?.type === "agent" ? req.actor.agentId ?? null : null;
     logger.error(
-      {
-        err: recordErr,
-        runId: runId || null,
-        agentId: req.actor?.type === "agent" ? req.actor.agentId ?? null : null,
-      },
+      { err: recordErr, runId: runId || null, agentId },
       "failed to record responsible-user denial on heartbeat run",
     );
+    // The rejected write says nothing about the next one: these are independent,
+    // non-transactional statements that may land on different pooled
+    // connections, so finalization can still succeed and close the run green
+    // with the denial recorded nowhere. Take the run out of `queued`/`running`
+    // with a separate write so the compare-and-set finalizer cannot do that.
+    if (runId) {
+      try {
+        await failRunAfterUnrecordedResponsibleUserDenial(db, {
+          runId,
+          agentId,
+          companyId: req.actor?.type === "agent" ? req.actor.companyId ?? null : null,
+          code,
+        });
+      } catch (failErr) {
+        logger.error(
+          { err: failErr, runId, agentId },
+          "failed to mark the heartbeat run failed after an unrecorded responsible-user denial",
+        );
+      }
+    }
     return "failed";
   }
 }
