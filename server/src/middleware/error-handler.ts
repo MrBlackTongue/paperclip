@@ -185,6 +185,16 @@ async function handleResponsibleUserDenial(
     // handled client error and finish the run cleanly, which is exactly the
     // state that lets continuation recovery restart the same denial loop.
     // Fail the request instead so the run cannot finalize as `succeeded`.
+    //
+    // This branch deliberately writes nothing else. Marking the run failed here
+    // would be the very same conditional update on `heartbeat_runs` that just
+    // came back empty or threw, and neither of the two ways to reach `failed`
+    // leaves a run that could still finalize as `succeeded`:
+    //   - the update matched no row, so the run is already terminal, and the
+    //     adapter finalization is a compare-and-set out of `running`
+    //     (`setRunStatusIfRunning`) that can no longer move it;
+    //   - the update threw, so the database is unavailable and the finalizing
+    //     write would fail on exactly the same connection.
     res.status(503).json({
       error: err.message,
       code: "responsible_user_denial_not_recorded",
