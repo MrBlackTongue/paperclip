@@ -113,9 +113,9 @@ describe("errorHandler", () => {
   });
 
   it("records responsible-user denial codes before sending the response", async () => {
-    let resolveRecord!: (value: null) => void;
+    let resolveRecord!: (value: { id: string }) => void;
     recordResponsibleUserDenialOnActiveRunMock.mockImplementationOnce(
-      () => new Promise<null>((resolve) => {
+      () => new Promise<{ id: string }>((resolve) => {
         resolveRecord = resolve;
       }),
     );
@@ -142,7 +142,7 @@ describe("errorHandler", () => {
     await Promise.resolve();
     expect(res.status).not.toHaveBeenCalled();
 
-    resolveRecord(null);
+    resolveRecord({ id: "run-1" });
     await handling;
 
     expect(res.status).toHaveBeenCalledWith(403);
@@ -184,6 +184,63 @@ describe("errorHandler", () => {
     expect(res.json).toHaveBeenCalledWith({
       error: "Responsible user is not authorized",
       code: "responsible_user_denial_not_recorded",
+    });
+  });
+
+  it("fails the request when no active run matched the denial", async () => {
+    recordResponsibleUserDenialOnActiveRunMock.mockResolvedValueOnce(null);
+    const req = {
+      ...makeReq(),
+      app: { locals: { paperclipDb: { marker: "db" } } },
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        runId: "run-1",
+        source: "agent_jwt",
+      },
+    } as unknown as Request;
+    const res = makeRes();
+    const next = vi.fn() as unknown as NextFunction;
+    const err = new HttpError(403, "Responsible user is not authorized", {
+      code: "RESPONSIBLE_USER_UNAUTHORIZED",
+    });
+
+    await errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Responsible user is not authorized",
+      code: "responsible_user_denial_not_recorded",
+    });
+  });
+
+  it("keeps the plain denial response for agent calls made outside a run", async () => {
+    recordResponsibleUserDenialOnActiveRunMock.mockResolvedValueOnce(null);
+    const req = {
+      ...makeReq(),
+      app: { locals: { paperclipDb: { marker: "db" } } },
+      actor: {
+        type: "agent",
+        agentId: "agent-1",
+        companyId: "company-1",
+        runId: null,
+        source: "agent_jwt",
+      },
+    } as unknown as Request;
+    const res = makeRes();
+    const next = vi.fn() as unknown as NextFunction;
+    const err = new HttpError(403, "Responsible user is unavailable", {
+      code: "RESPONSIBLE_USER_UNAVAILABLE",
+    });
+
+    await errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({
+      error: "Responsible user is unavailable",
+      code: "RESPONSIBLE_USER_UNAVAILABLE",
+      details: { code: "RESPONSIBLE_USER_UNAVAILABLE" },
     });
   });
 });

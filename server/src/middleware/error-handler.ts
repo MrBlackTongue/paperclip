@@ -87,19 +87,34 @@ async function recordResponsibleUserDenialFromHttpError(
     return "not_applicable";
   }
 
+  const runId = req.actor.runId?.trim() ?? "";
+
   try {
-    await recordResponsibleUserDenialOnActiveRun(db, {
-      runId: req.actor.runId ?? null,
+    const recorded = await recordResponsibleUserDenialOnActiveRun(db, {
+      runId: runId || null,
       agentId: req.actor.agentId ?? null,
       companyId: req.actor.companyId ?? null,
       code,
     });
-    return "recorded";
+    if (recorded) return "recorded";
+    if (!runId) {
+      // The caller is an agent token used outside a heartbeat run. There is no
+      // run to poison and no continuation loop to restart, so the denial stays
+      // an ordinary handled client error.
+      return "not_applicable";
+    }
+    // A run id was presented but no active run matched it, so the denial code
+    // was not persisted anywhere. Treat that exactly like a write failure.
+    logger.error(
+      { runId, agentId: req.actor.agentId ?? null, code },
+      "responsible-user denial not recorded: no active heartbeat run matched the request run id",
+    );
+    return "failed";
   } catch (recordErr) {
     logger.error(
       {
         err: recordErr,
-        runId: req.actor?.runId ?? null,
+        runId: runId || null,
         agentId: req.actor?.type === "agent" ? req.actor.agentId ?? null : null,
       },
       "failed to record responsible-user denial on heartbeat run",
