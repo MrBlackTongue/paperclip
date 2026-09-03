@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
-  failRunAfterUnrecordedResponsibleUserDenial,
   normalizeResponsibleUserDenialCode,
   recordResponsibleUserDenialOnActiveRun,
 } from "./responsible-user-denial-run-outcomes.js";
@@ -15,7 +14,7 @@ vi.mock("./live-events.js", () => ({
 function makeDbReturning(row: Record<string, unknown> | null) {
   const returning = vi.fn(() => Promise.resolve(row ? [row] : []));
   const where = vi.fn(() => ({ returning }));
-  const set = vi.fn(() => ({ where }));
+  const set = vi.fn((_patch: Record<string, unknown>) => ({ where }));
   const update = vi.fn(() => ({ set }));
   return {
     db: { update } as unknown as Db,
@@ -66,6 +65,9 @@ describe("responsible-user denial run outcomes", () => {
     expect(set).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "RESPONSIBLE_USER_UNAUTHORIZED",
     }));
+    const persistedPatch = set.mock.calls[0]?.[0];
+    expect(persistedPatch).not.toHaveProperty("status");
+    expect(persistedPatch).not.toHaveProperty("finishedAt");
     expect(publishLiveEventMock).toHaveBeenCalledWith({
       companyId: "company-1",
       type: "heartbeat.run.status",
@@ -88,53 +90,6 @@ describe("responsible-user denial run outcomes", () => {
       code: "access_denied",
     });
 
-    expect(update).not.toHaveBeenCalled();
-  });
-  it("takes the run out of the live statuses when its denial stayed unrecorded", async () => {
-    publishLiveEventMock.mockReset();
-    const row = {
-      id: "run-1",
-      companyId: "company-1",
-      agentId: "agent-1",
-      status: "failed",
-      invocationSource: "on_demand",
-      triggerDetail: null,
-      error: "responsible-user denial RESPONSIBLE_USER_UNAVAILABLE could not be recorded on this run",
-      errorCode: "RESPONSIBLE_USER_UNAVAILABLE",
-      startedAt: null,
-      finishedAt: new Date("2026-07-02T10:05:00.000Z"),
-    };
-    const { db, update, set } = makeDbReturning(row);
-
-    const updated = await failRunAfterUnrecordedResponsibleUserDenial(db, {
-      runId: "run-1",
-      agentId: "agent-1",
-      companyId: "company-1",
-      code: "RESPONSIBLE_USER_UNAVAILABLE",
-    });
-
-    expect(updated).toBe(row);
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(set).toHaveBeenCalledWith(expect.objectContaining({
-      status: "failed",
-      errorCode: "RESPONSIBLE_USER_UNAVAILABLE",
-      finishedAt: expect.any(Date),
-    }));
-    expect(publishLiveEventMock).toHaveBeenCalledWith(expect.objectContaining({
-      companyId: "company-1",
-      type: "heartbeat.run.status",
-    }));
-  });
-
-  it("does not fail a run when there is no run id to fail", async () => {
-    const { db, update } = makeDbReturning(null);
-
-    const updated = await failRunAfterUnrecordedResponsibleUserDenial(db, {
-      runId: "   ",
-      code: "RESPONSIBLE_USER_UNAVAILABLE",
-    });
-
-    expect(updated).toBeNull();
     expect(update).not.toHaveBeenCalled();
   });
 });

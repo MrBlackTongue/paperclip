@@ -1329,9 +1329,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     "RESPONSIBLE_USER_UNAUTHORIZED",
     "RESPONSIBLE_USER_UNAVAILABLE",
   ] as const)(
-    "fails closed on a recorded %s denial and creates one recovery action without a continuation retry",
+    "fails closed on a recorded %s denial, completes teardown, and creates one recovery action without a continuation retry",
     async (errorCode) => {
-      const { companyId, agentId, issueId, runId } = await seedQueuedIssueRunFixture();
+      const { companyId, agentId, issueId, runId, wakeupRequestId } =
+        await seedQueuedIssueRunFixture();
       mockAdapterExecute.mockImplementationOnce(async () => {
         await db
           .update(heartbeatRuns)
@@ -1374,7 +1375,30 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .from(issues)
         .where(eq(issues.id, issueId))
         .then((rows) => rows[0] ?? null);
-      expect(sourceIssue?.status).toBe("blocked");
+      expect(sourceIssue).toMatchObject({
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+      });
+
+      const runWakeup = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null);
+      expect(runWakeup).toMatchObject({
+        status: "failed",
+        finishedAt: expect.any(Date),
+      });
+
+      const settledAgent = await db
+        .select({ status: agents.status })
+        .from(agents)
+        .where(eq(agents.id, agentId))
+        .then((rows) => rows[0] ?? null);
+      expect(settledAgent?.status).toBe("error");
 
       const comments = await db
         .select()

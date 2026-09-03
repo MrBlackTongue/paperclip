@@ -7,10 +7,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { captureException } from "../sentry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
 import { logger } from "./logger.js";
-import {
-  failRunAfterUnrecordedResponsibleUserDenial,
-  recordResponsibleUserDenialOnActiveRun,
-} from "../services/responsible-user-denial-run-outcomes.js";
+import { recordResponsibleUserDenialOnActiveRun } from "../services/responsible-user-denial-run-outcomes.js";
 
 export interface ErrorContext {
   error: { message: string; stack?: string; name?: string; details?: unknown; raw?: unknown };
@@ -119,21 +116,22 @@ async function recordResponsibleUserDenialFromHttpError(
     );
     // The rejected write says nothing about the next one: these are independent,
     // non-transactional statements that may land on different pooled
-    // connections, so finalization can still succeed and close the run green
-    // with the denial recorded nowhere. Take the run out of `queued`/`running`
-    // with a separate write so the compare-and-set finalizer cannot do that.
+    // connections. Retry the durable denial marker once, but deliberately leave
+    // the run live. Adapter finalization owns the terminal status together with
+    // wakeup settlement, issue-lock release, and agent-status cleanup; changing
+    // the status here would make that finalizer return before those side effects.
     if (runId) {
       try {
-        await failRunAfterUnrecordedResponsibleUserDenial(db, {
+        await recordResponsibleUserDenialOnActiveRun(db, {
           runId,
           agentId,
           companyId: req.actor?.type === "agent" ? req.actor.companyId ?? null : null,
           code,
         });
-      } catch (failErr) {
+      } catch (fallbackErr) {
         logger.error(
-          { err: failErr, runId, agentId },
-          "failed to mark the heartbeat run failed after an unrecorded responsible-user denial",
+          { err: fallbackErr, runId, agentId },
+          "failed the fallback attempt to record responsible-user denial on heartbeat run",
         );
       }
     }
@@ -204,15 +202,10 @@ async function handleResponsibleUserDenial(
     // state that lets continuation recovery restart the same denial loop.
     // Fail the request instead so the run cannot finalize as `succeeded`.
     //
-    // This branch deliberately writes nothing else. Marking the run failed here
-    // would be the very same conditional update on `heartbeat_runs` that just
-    // came back empty or threw, and neither of the two ways to reach `failed`
-    // leaves a run that could still finalize as `succeeded`:
-    //   - the update matched no row, so the run is already terminal, and the
-    //     adapter finalization is a compare-and-set out of `running`
-    //     (`setRunStatusIfRunning`) that can no longer move it;
-    //   - the update threw, so the database is unavailable and the finalizing
-    //     write would fail on exactly the same connection.
+    // A thrown first write gets one independent fallback attempt before this
+    // response. When that attempt succeeds, it leaves the run live with the
+    // denial code recorded; adapter finalization then fails the run and performs
+    // all terminal cleanup. A no-match means the run is already terminal.
     res.status(503).json({
       error: err.message,
       code: "responsible_user_denial_not_recorded",

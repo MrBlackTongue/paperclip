@@ -4,11 +4,9 @@ import { HttpError } from "../errors.js";
 import { errorHandler } from "../middleware/error-handler.js";
 
 const recordResponsibleUserDenialOnActiveRunMock = vi.hoisted(() => vi.fn());
-const failRunAfterUnrecordedResponsibleUserDenialMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/responsible-user-denial-run-outcomes.js", () => ({
   recordResponsibleUserDenialOnActiveRun: recordResponsibleUserDenialOnActiveRunMock,
-  failRunAfterUnrecordedResponsibleUserDenial: failRunAfterUnrecordedResponsibleUserDenialMock,
 }));
 
 function makeReq(): Request {
@@ -34,8 +32,6 @@ describe("errorHandler", () => {
   beforeEach(() => {
     recordResponsibleUserDenialOnActiveRunMock.mockReset();
     recordResponsibleUserDenialOnActiveRunMock.mockResolvedValue(null);
-    failRunAfterUnrecordedResponsibleUserDenialMock.mockReset();
-    failRunAfterUnrecordedResponsibleUserDenialMock.mockResolvedValue(null);
   });
 
   it("attaches the original Error to res.err for 500s", () => {
@@ -191,8 +187,10 @@ describe("errorHandler", () => {
     });
   });
 
-  it("fails the run itself when the denial write throws", async () => {
-    recordResponsibleUserDenialOnActiveRunMock.mockRejectedValueOnce(new Error("db down"));
+  it("retries the denial marker without terminalizing the run when the first write throws", async () => {
+    recordResponsibleUserDenialOnActiveRunMock
+      .mockRejectedValueOnce(new Error("db down"))
+      .mockResolvedValueOnce({ id: "run-1", status: "running" });
     const db = { marker: "db" };
     const req = {
       ...makeReq(),
@@ -213,7 +211,8 @@ describe("errorHandler", () => {
 
     await errorHandler(err, req, res, next);
 
-    expect(failRunAfterUnrecordedResponsibleUserDenialMock).toHaveBeenCalledWith(db, {
+    expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenCalledTimes(2);
+    expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenLastCalledWith(db, {
       runId: "run-1",
       agentId: "agent-1",
       companyId: "company-1",
@@ -222,9 +221,10 @@ describe("errorHandler", () => {
     expect(res.status).toHaveBeenCalledWith(503);
   });
 
-  it("still answers 503 when the fallback run failure also throws", async () => {
-    recordResponsibleUserDenialOnActiveRunMock.mockRejectedValueOnce(new Error("db down"));
-    failRunAfterUnrecordedResponsibleUserDenialMock.mockRejectedValueOnce(new Error("db still down"));
+  it("still answers 503 when the fallback denial marker also throws", async () => {
+    recordResponsibleUserDenialOnActiveRunMock
+      .mockRejectedValueOnce(new Error("db down"))
+      .mockRejectedValueOnce(new Error("db still down"));
     const req = {
       ...makeReq(),
       app: { locals: { paperclipDb: { marker: "db" } } },
@@ -272,7 +272,7 @@ describe("errorHandler", () => {
 
     await errorHandler(err, req, res, next);
 
-    expect(failRunAfterUnrecordedResponsibleUserDenialMock).not.toHaveBeenCalled();
+    expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenCalledTimes(1);
     expect(res.status).toHaveBeenCalledWith(503);
     expect(res.json).toHaveBeenCalledWith({
       error: "Responsible user is not authorized",
