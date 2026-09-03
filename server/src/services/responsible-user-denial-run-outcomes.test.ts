@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
+  clearRememberedResponsibleUserDenialForRun,
+  getRememberedResponsibleUserDenialForRun,
   normalizeResponsibleUserDenialCode,
   recordResponsibleUserDenialOnActiveRun,
+  rememberResponsibleUserDenialForRun,
 } from "./responsible-user-denial-run-outcomes.js";
 
 const publishLiveEventMock = vi.hoisted(() => vi.fn());
@@ -35,6 +38,20 @@ describe("responsible-user denial run outcomes", () => {
     );
     expect(normalizeResponsibleUserDenialCode("access_denied")).toBeNull();
     expect(normalizeResponsibleUserDenialCode(null)).toBeNull();
+  });
+
+  it("remembers a denial until the run finalizer clears it", () => {
+    expect(
+      rememberResponsibleUserDenialForRun(
+        "run-memory",
+        "RESPONSIBLE_USER_UNAVAILABLE",
+      ),
+    ).toBe("RESPONSIBLE_USER_UNAVAILABLE");
+    expect(getRememberedResponsibleUserDenialForRun("run-memory")).toBe(
+      "RESPONSIBLE_USER_UNAVAILABLE",
+    );
+    expect(clearRememberedResponsibleUserDenialForRun("run-memory")).toBe(true);
+    expect(getRememberedResponsibleUserDenialForRun("run-memory")).toBeNull();
   });
 
   it("records the code on an active run and publishes the live status payload", async () => {

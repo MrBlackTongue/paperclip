@@ -7,7 +7,10 @@ import { getTelemetryClient } from "../telemetry.js";
 import { captureException } from "../sentry.js";
 import { COMPANY_IMPORT_API_PATH } from "../routes/company-import-paths.js";
 import { logger } from "./logger.js";
-import { recordResponsibleUserDenialOnActiveRun } from "../services/responsible-user-denial-run-outcomes.js";
+import {
+  recordResponsibleUserDenialOnActiveRun,
+  rememberResponsibleUserDenialForRun,
+} from "../services/responsible-user-denial-run-outcomes.js";
 
 export interface ErrorContext {
   error: { message: string; stack?: string; name?: string; details?: unknown; raw?: unknown };
@@ -110,6 +113,10 @@ async function recordResponsibleUserDenialFromHttpError(
     return "failed";
   } catch (recordErr) {
     const agentId = req.actor?.type === "agent" ? req.actor.agentId ?? null : null;
+    // Once the primary durable write fails, establish an independent in-process
+    // fail-closed signal before retrying. The adapter cannot observe this HTTP
+    // response and exit before the heartbeat finalizer can see that signal.
+    if (runId) rememberResponsibleUserDenialForRun(runId, code);
     logger.error(
       { err: recordErr, runId: runId || null, agentId },
       "failed to record responsible-user denial on heartbeat run",

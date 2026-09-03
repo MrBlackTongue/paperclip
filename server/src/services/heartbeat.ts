@@ -152,7 +152,11 @@ import {
   type NativeExecutionInput,
   type NativeSessionBackend,
 } from "../vendor/paperclip-runner/index.js";
-import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
+import {
+  clearRememberedResponsibleUserDenialForRun,
+  getRememberedResponsibleUserDenialForRun,
+  normalizeResponsibleUserDenialCode,
+} from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import {
   providerTraceStore,
@@ -10705,6 +10709,7 @@ export function heartbeatService(
     if (updated) {
       if (isHeartbeatRunTerminalStatus(updated.status)) {
         clearHeartbeatRunRuntimeStatus(updated.id);
+        clearRememberedResponsibleUserDenialForRun(updated.id);
       }
       publishLiveEvent({
         companyId: updated.companyId,
@@ -10751,6 +10756,7 @@ export function heartbeatService(
     if (updated) {
       if (isHeartbeatRunTerminalStatus(updated.status)) {
         clearHeartbeatRunRuntimeStatus(updated.id);
+        clearRememberedResponsibleUserDenialForRun(updated.id);
       }
       publishLiveEvent({
         companyId: updated.companyId,
@@ -10766,6 +10772,10 @@ export function heartbeatService(
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
+
+    if (current && isHeartbeatRunTerminalStatus(current.status)) {
+      clearRememberedResponsibleUserDenialForRun(current.id);
+    }
 
     return { run: current, updated: false as const };
   }
@@ -21045,7 +21055,8 @@ export function heartbeatService(
         let outcome: RunSessionOutcome;
         const latestRun = await getRun(run.id);
         const recordedResponsibleUserDenialCode =
-          normalizeResponsibleUserDenialCode(latestRun?.errorCode);
+          normalizeResponsibleUserDenialCode(latestRun?.errorCode) ??
+          getRememberedResponsibleUserDenialForRun(run.id);
         if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
           outcome = latestRun.status;
         } else if (recordedResponsibleUserDenialCode) {
@@ -21627,7 +21638,7 @@ export function heartbeatService(
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(
             (await getRun(run.id).catch(() => null))?.errorCode,
-          );
+          ) ?? getRememberedResponsibleUserDenialForRun(run.id);
         // The runtime resolution is scoped to the adapter try block. The
         // durable coordinator is also the stronger authority here: legacy
         // runs simply have no row, while native result-less exhaustion keeps
@@ -21837,7 +21848,7 @@ export function heartbeatService(
         const recordedResponsibleUserDenialCode =
           normalizeResponsibleUserDenialCode(
             (await getRun(runId).catch(() => null))?.errorCode,
-          );
+          ) ?? getRememberedResponsibleUserDenialForRun(runId);
         const setupFailureErrorCode =
           workspaceValidationSetupFailure?.code ??
           configurationIncompleteSetupFailure?.code ??

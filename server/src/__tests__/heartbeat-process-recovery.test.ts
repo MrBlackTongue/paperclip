@@ -131,6 +131,10 @@ import {
 } from "../services/recovery/index.ts";
 import { collectDispositionRepairSourceState } from "../services/recovery/disposition-repair.ts";
 import {
+  getRememberedResponsibleUserDenialForRun,
+  rememberResponsibleUserDenialForRun,
+} from "../services/responsible-user-denial-run-outcomes.ts";
+import {
   UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
   UNMANAGED_BACKGROUND_TASK_STOP_REASON,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -1421,6 +1425,79 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       )).toBe(false);
     },
   );
+
+  it("fails closed on a process-local denial when both durable marker writes fail", async () => {
+    const { companyId, agentId, issueId, runId, wakeupRequestId } =
+      await seedQueuedIssueRunFixture();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      rememberResponsibleUserDenialForRun(
+        runId,
+        "RESPONSIBLE_USER_UNAUTHORIZED",
+      );
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Stopped after both durable denial marker writes failed.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId);
+    await heartbeat.waitForRunExecutionDrain(runId);
+
+    const settledRun = await heartbeat.getRun(runId);
+    expect(settledRun).toMatchObject({
+      status: "failed",
+      errorCode: "RESPONSIBLE_USER_UNAUTHORIZED",
+    });
+    expect(getRememberedResponsibleUserDenialForRun(runId)).toBeNull();
+
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(sourceIssue).toMatchObject({
+      status: "blocked",
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+    });
+
+    const runWakeup = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0] ?? null);
+    expect(runWakeup).toMatchObject({
+      status: "failed",
+      finishedAt: expect.any(Date),
+    });
+
+    const settledAgent = await db
+      .select({ status: agents.status })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    expect(settledAgent?.status).toBe("error");
+
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, companyId),
+          eq(issueRecoveryActions.sourceIssueId, issueId),
+        ),
+      );
+    expect(recoveryActions).toHaveLength(1);
+  });
 
   it("keeps a local run active when the recorded pid is still alive", async () => {
     const child = spawnAliveProcess();

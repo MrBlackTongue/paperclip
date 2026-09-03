@@ -4,9 +4,11 @@ import { HttpError } from "../errors.js";
 import { errorHandler } from "../middleware/error-handler.js";
 
 const recordResponsibleUserDenialOnActiveRunMock = vi.hoisted(() => vi.fn());
+const rememberResponsibleUserDenialForRunMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/responsible-user-denial-run-outcomes.js", () => ({
   recordResponsibleUserDenialOnActiveRun: recordResponsibleUserDenialOnActiveRunMock,
+  rememberResponsibleUserDenialForRun: rememberResponsibleUserDenialForRunMock,
 }));
 
 function makeReq(): Request {
@@ -32,6 +34,7 @@ describe("errorHandler", () => {
   beforeEach(() => {
     recordResponsibleUserDenialOnActiveRunMock.mockReset();
     recordResponsibleUserDenialOnActiveRunMock.mockResolvedValue(null);
+    rememberResponsibleUserDenialForRunMock.mockReset();
   });
 
   it("attaches the original Error to res.err for 500s", () => {
@@ -157,6 +160,7 @@ describe("errorHandler", () => {
       companyId: "company-1",
       code: "RESPONSIBLE_USER_UNAUTHORIZED",
     });
+    expect(rememberResponsibleUserDenialForRunMock).not.toHaveBeenCalled();
   });
 
   it("fails the request when the responsible-user denial cannot be recorded", async () => {
@@ -212,6 +216,10 @@ describe("errorHandler", () => {
     await errorHandler(err, req, res, next);
 
     expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenCalledTimes(2);
+    expect(rememberResponsibleUserDenialForRunMock).toHaveBeenCalledWith(
+      "run-1",
+      "RESPONSIBLE_USER_UNAUTHORIZED",
+    );
     expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenLastCalledWith(db, {
       runId: "run-1",
       agentId: "agent-1",
@@ -273,6 +281,7 @@ describe("errorHandler", () => {
     await errorHandler(err, req, res, next);
 
     expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenCalledTimes(1);
+    expect(rememberResponsibleUserDenialForRunMock).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(503);
     expect(res.json).toHaveBeenCalledWith({
       error: "Responsible user is not authorized",
@@ -302,6 +311,7 @@ describe("errorHandler", () => {
     await errorHandler(err, req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(403);
+    expect(rememberResponsibleUserDenialForRunMock).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({
       error: "Responsible user is unavailable",
       code: "RESPONSIBLE_USER_UNAVAILABLE",
