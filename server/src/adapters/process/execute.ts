@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { assertFixedProcessExecution } from "./fixed-command.js";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "../types.js";
 import {
   asString,
@@ -37,6 +38,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
 async function executeProcess(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, config, onLog, onMeta, authToken } = ctx;
+  assertFixedProcessExecution(agent.adapterConfig, config, ctx.context);
   const command = asString(config.command, "");
   if (!command) throw new Error("Process adapter missing command");
 

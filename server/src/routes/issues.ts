@@ -16,6 +16,7 @@ import { createIssueReadTiming } from "../services/issue-read-timing.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { retryNativeWorkspaceExport } from "../services/native-runtime/native-workspace-export-retry.js";
 import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
+import { trustedWatchdogOrigin, trustedWatchdogContext } from "../middleware/watchdog-service-request.js";
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
@@ -3695,6 +3696,7 @@ export function issueRoutes(
       responsibleUserId: req.actor.onBehalfOfUserId ?? null,
       targetIssueId: issue.id,
       targetIssueIdentifier: issue.identifier ?? null,
+      authenticatedSource: req.actor.source,
       kind,
     });
     if (!decision || decision.allowed) return true;
@@ -12403,6 +12405,7 @@ export function issueRoutes(
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
         originRunId: createBody.originRunId ?? actor.runId,
+        ...trustedWatchdogOrigin(req),
         originIdentityContextId: req.actor.identityContextId ?? null,
         executionPolicy,
         ...(sourceTrust ? { sourceTrust } : {}),
@@ -18437,6 +18440,7 @@ export function issueRoutes(
         currentIssue.executionPolicy ?? null,
       );
       const shouldAutoApproveReviewComment =
+        !trustedWatchdogContext(req) &&
         currentIssue.status === "in_review" &&
         currentExecutionState?.status === "pending" &&
         actorMatchesExecutionParticipant(
@@ -18611,6 +18615,7 @@ export function issueRoutes(
           clientRequestId: actor.actorType === "user" ? req.body.clientRequestId : undefined,
           mirrorToSlack: actor.actorType === "user",
           authorizationReason: commentAuthorizationReason,
+          watchdogContext: trustedWatchdogContext(req),
           sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
         };
         const add = (dbOrTx: Db = db) =>
