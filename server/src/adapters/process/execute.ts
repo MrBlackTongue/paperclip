@@ -60,11 +60,10 @@ async function executeProcess(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   env.PAPERCLIP_RUN_ID = runId;
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
-  // runtimeEnv is only used to resolve the command path and log HOME below;
-  // the child env is built inside runChildProcess from
-  // sanitizeInheritedPaperclipEnv(process.env) + env, so a PAPERCLIP_API_KEY
-  // on the server process never reaches the child.
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const inheritEnv = parseObject(agent.adapterConfig).fixedCommand !== true;
+  // Fixed processes receive only the approved adapter environment and runtime
+  // metadata. Ordinary processes retain sanitized server environment inheritance.
+  const runtimeEnv = ensurePathInEnv({ ...(inheritEnv ? process.env : {}), ...env });
   const resolvedCommand = await resolveCommandForLogs(command, cwd, runtimeEnv);
   const loggedEnv = buildInvocationEnvForLogs(env, {
     runtimeEnv,
@@ -98,7 +97,7 @@ async function executeProcess(ctx: AdapterExecutionContext): Promise<AdapterExec
       env.PAPERCLIP_CONNECTION_INSTRUCTIONS_FILE = instructionsFile;
     }
     proc = await runChildProcess(runId, command, args, {
-      cwd, env, timeoutSec, graceSec, onLog, onSpawn: ctx.onSpawn,
+      cwd, env, inheritEnv, timeoutSec, graceSec, onLog, onSpawn: ctx.onSpawn,
     });
   } finally {
     if (instructionsDirectory) await rm(instructionsDirectory, { recursive: true, force: true });
