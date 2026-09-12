@@ -1,3 +1,4 @@
+import { assertFixedProcessUnresolvedEnvironment, captureFixedProcessEnvironment } from "../adapters/process/fixed-command.js";
 import { createHeartbeatRunCompletion } from "./heartbeat/run-completion.js";
 export {
   MAX_TURN_CONTINUATION_WAKE_REASON,
@@ -3612,6 +3613,9 @@ export function heartbeatService(
           selectedEnvironmentForConfig?.driver ?? "local",
         );
 
+      const fixedProcessConfig = agent.adapterType === "process" ? agent.adapterConfig : {};
+      assertFixedProcessUnresolvedEnvironment(fixedProcessConfig, executionRunConfig,
+        [selectedEnvironmentForConfig?.envVars, projectContext?.env, routineEnvContext.env]);
       const { resolvedConfig, configuredTaskEnvironment, secretKeys, secretManifest } =
         await resolveExecutionRunAdapterConfig({
           managedAiCredentials: Boolean(aiBinding),
@@ -3633,6 +3637,7 @@ export function heartbeatService(
           secretsSvc,
           trustPreset,
         });
+      let approveFixedProcessEnvironment = captureFixedProcessEnvironment(fixedProcessConfig, resolvedConfig);
       readFailureReportSecrets = () => collectRunFailureSecretValues(resolvedConfig.env, secretKeys);
       if (aiBinding) {
         try {
@@ -4894,6 +4899,7 @@ export function heartbeatService(
           }
         }
       };
+      approveFixedProcessEnvironment(runtimeConfig);
       if (!executionTarget || executionTarget.kind === "local") {
         try {
           runScratch = await prepareHeartbeatRunScratch({
@@ -4938,6 +4944,9 @@ export function heartbeatService(
       } else {
         delete context.paperclipScratch;
       }
+      // Only controller-created scratch variables changed the checked environment.
+      approveFixedProcessEnvironment = captureFixedProcessEnvironment(fixedProcessConfig, runtimeConfig);
+      approveFixedProcessEnvironment(runtimeConfig);
       const gitExecutionEnv = await prepareGitHubExecutionEnvironment({
         target: executionTarget,
         cwd: executionWorkspace.cwd,
@@ -4978,6 +4987,9 @@ export function heartbeatService(
         runtimeConfig = { ...runtimeConfig, env: githubLaunchers.env };
         secretKeys.add("PAPERCLIP_GITHUB_BROKER_TOKEN");
       }
+      // Git credential transport is also controller-owned; no request override
+      // may change the result between this snapshot and process dispatch.
+      approveFixedProcessEnvironment = captureFixedProcessEnvironment(fixedProcessConfig, runtimeConfig);
       context.paperclipEnvironment = {
         id: selectedEnvironment.id,
         name: selectedEnvironment.name,
@@ -7066,6 +7078,7 @@ export function heartbeatService(
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
                 (markDispatchStarted) => {
+                  approveFixedProcessEnvironment(runtimeConfig);
                   legacyAdapterEntered = true;
                   return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
                     getFreshSessionHandoff,
