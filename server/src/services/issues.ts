@@ -97,6 +97,7 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { lockSharedWorkspaceBinding, preserveDeletedSharedWorkspaceOwner } from "./shared-workspace-holders.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -10065,6 +10066,7 @@ export function issueService(db: Db) {
           }),
         );
 
+        await lockSharedWorkspaceBinding(tx, companyId, values.executionWorkspaceId);
         const [issue] = await tx.insert(issues).values(values).returning();
         if (idempotencyKey) {
           await tx.insert(issueCreateIdempotencyKeys).values({
@@ -10785,6 +10787,25 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (patch.executionWorkspaceId) {
+          await lockSharedWorkspaceBinding(tx, receiptExisting.companyId, patch.executionWorkspaceId);
+        } else if (patch.status && !["done", "cancelled"].includes(patch.status)
+          && ["done", "cancelled"].includes(receiptExisting.status)
+          && !receiptExisting.executionWorkspaceId
+          && receiptExisting.executionWorkspacePreference === "reuse_existing") {
+          // Terminal cleanup may already have detached the archived session.
+          patch.executionWorkspacePreference = null;
+        } else if (patch.status && !["done", "cancelled"].includes(patch.status)
+          && ["done", "cancelled"].includes(receiptExisting.status)
+          && receiptExisting.executionWorkspaceId) {
+          const available = await lockSharedWorkspaceBinding(tx, receiptExisting.companyId, receiptExisting.executionWorkspaceId, true);
+          if (!available) {
+            // The shared directory survives archive. Let the next run resolve
+            // its current environment and record an explicitly linked replacement.
+            patch.executionWorkspaceId = null;
+            patch.executionWorkspacePreference = null;
+          }
+        }
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
@@ -11164,6 +11185,7 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        await preserveDeletedSharedWorkspaceOwner(tx, id);
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)

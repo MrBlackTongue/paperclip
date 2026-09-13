@@ -1,4 +1,6 @@
 import { createWorkspaceGitInspectionCache } from "./workspace-git-inspection-cache.js";
+import { createOrReuseSharedWorkspace, sharedWorkspaceReuseKey } from "./shared-workspace-reuse.js";
+import { sharedSourceIssueKey, sharedWorkspaceIssueTree, sharedWorkspaceHoldersAreTerminal, sharedWorkspaceHasNoLiveRuns } from "./shared-workspace-holders.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
@@ -1323,8 +1325,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // flag lets only one sweep run at a time, so one sweep owns the shared state.
   let terminalSweepInProgress = false;
 
-  async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "companyId" | "sourceIssueId">) {
-    if (!workspace.sourceIssueId) return [];
+  async function listWorkspaceIssueTree(workspace: Pick<ExecutionWorkspaceRow, "id" | "mode" | "companyId" | "sourceIssueId">) {
+    if (!workspace.sourceIssueId && workspace.mode !== "shared_workspace") return [];
     return db
       .select({
         id: issues.id,
@@ -1336,7 +1338,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .from(issues)
       .where(and(
         eq(issues.companyId, workspace.companyId),
-        sql<boolean>`
+        workspace.mode === "shared_workspace"
+          ? sql<boolean>`${issues.id} IN (${sharedWorkspaceIssueTree(workspace)} SELECT id FROM shared_holders)`
+          : sql<boolean>`
           ${issues.id} IN (
             WITH RECURSIVE issue_tree(id) AS (
               SELECT ${issues.id}
@@ -1386,8 +1390,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   async function assessIssueTreeTerminality(workspace: ExecutionWorkspaceRow) {
     const issueTree = await listWorkspaceIssueTree(workspace);
     const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
-    const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
-    const subtreeTerminal = Boolean(sourceIssue && issueTree.every((issue) => TERMINAL_ISSUE_STATUSES.has(issue.status)));
+    const deletedSharedSource = workspace.mode === "shared_workspace" && !workspace.sourceIssueId
+      && typeof workspace.metadata?.[sharedSourceIssueKey] === "string";
+    const sourceIssueTerminal = deletedSharedSource || Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
+    const subtreeTerminal = Boolean((sourceIssue || deletedSharedSource) && issueTree.every((issue) => TERMINAL_ISSUE_STATUSES.has(issue.status)));
     // The cooldown anchor is the most recent terminal timestamp across the whole
     // issue tree. The reaper compares it against the cooldown window. A null
     // anchor means no issue in the tree is terminal yet, so the cooldown never
@@ -2575,7 +2581,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       const baseCandidateFilter = and(
         inArray(executionWorkspaces.status, ["active", "idle", "in_review"]),
         isNull(executionWorkspaces.closedAt),
-        sql<boolean>`${executionWorkspaces.sourceIssueId} IS NOT NULL`,
+        or(sql<boolean>`${executionWorkspaces.sourceIssueId} IS NOT NULL`,
+          and(eq(executionWorkspaces.mode, "shared_workspace"),
+            sql`${executionWorkspaces.metadata} ->> ${sharedSourceIssueKey} IS NOT NULL`)),
       );
       // Continue the scan after the previous sweep's last row. The keyset
       // predicate uses the same (updatedAt, id) order as the query, so each
@@ -2827,7 +2835,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               inArray(executionWorkspaces.status, ["active", "idle", "in_review"]),
               isNull(executionWorkspaces.closedAt),
               sql<boolean>`(${executionWorkspaces.metadata} ->> ${EXECUTION_WORKSPACE_REOPEN_PENDING_METADATA_KEY}) IS DISTINCT FROM 'true'`,
-              sql<boolean>`EXISTS (
+              sharedSession ? sharedWorkspaceHoldersAreTerminal(workspace) : undefined,
+              sharedSession ? sharedWorkspaceHasNoLiveRuns(workspace) : undefined,
+              sharedSession ? noActiveRuntimeServicesForWorkspaceCondition(workspace) : undefined,
+              sharedSession && !workspace.sourceIssueId
+                ? sql`${executionWorkspaces.sourceIssueId} IS NULL AND ${executionWorkspaces.metadata} ->> ${sharedSourceIssueKey} IS NOT NULL`
+                : sql<boolean>`EXISTS (
                 SELECT 1
                 FROM ${issues} source_issue
                 WHERE source_issue.company_id = ${workspace.companyId}
@@ -2956,7 +2969,13 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       }
     },
 
-    create: async (data: typeof executionWorkspaces.$inferInsert) => {
+    create: async (data: typeof executionWorkspaces.$inferInsert, reuse?: { identity: string; runId: string }) => {
+      if (reuse && sharedWorkspaceReuseKey(data, reuse.identity)) {
+        const row = await createOrReuseSharedWorkspace({
+          db, data, ...reuse, lockWorkspace: acquireExecutionWorkspaceLifecycleLock,
+        });
+        return row ? toExecutionWorkspace(row) : null;
+      }
       const row = await db
         .insert(executionWorkspaces)
         .values(data)

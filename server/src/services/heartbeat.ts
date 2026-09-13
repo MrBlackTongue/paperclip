@@ -12,6 +12,7 @@ import { aiConnectionBindingSchema } from "@paperclipai/shared";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
+import { captureSharedWorkspaceIdentity } from "./shared-workspace-reuse.js";
 import {
   legacyExecutionNeedsReconciliation,
   terminalizeLegacyExecution,
@@ -21348,6 +21349,20 @@ export function heartbeatService(
       const branchNameForInitialPersistence =
         pendingForwardBranchReconcile?.recordedBranchName ??
         executionWorkspace.branchName;
+      // Project-primary realization only resolves the path. Capture its physical
+      // identity before provisioning commands or the adapter can change files.
+      const sharedSessionIdentity = issueRef?.id &&
+        effectiveExecutionWorkspaceMode === "shared_workspace" &&
+        executionWorkspace.strategy === "project_primary" &&
+        selectedEnvironmentForConfig?.driver === "local" &&
+        latestWorkspaceConfigMetadata?.fingerprint
+        ? await captureSharedWorkspaceIdentity({
+            cwd: executionWorkspace.cwd,
+            environmentId: selectedEnvironmentForConfig.id,
+            environmentDriver: selectedEnvironmentForConfig.driver,
+            configFingerprint: latestWorkspaceConfigMetadata.fingerprint,
+          })
+        : null;
       try {
         persistedExecutionWorkspace =
           resolvedWorkspaceReusePolicy.shouldRestoreExistingWorkspace &&
@@ -21409,7 +21424,7 @@ export function heartbeatService(
                   lastUsedAt: new Date(),
                   openedAt: new Date(),
                   metadata: nextExecutionWorkspaceMetadata,
-                })
+                }, sharedSessionIdentity ? { identity: sharedSessionIdentity, runId: run.id } : undefined)
               : null;
       } catch (error) {
         if (executionWorkspace.created) {
