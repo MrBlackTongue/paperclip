@@ -2050,6 +2050,23 @@ export function recoveryService(
     return userResolvedInteraction === null;
   }
 
+  // A paused company is a deliberate operator stop, not stranded work. No run
+  // can start while the pause holds, so every assigned issue of that company
+  // looks abandoned and `getInvocationBlock` answers with a company block for
+  // all of them. Escalating on that answer outlives the pause: resuming the
+  // company does not reopen a blocked issue, which has no dispatch queue, no
+  // monitor and no blocker of its own. This reads the live row on purpose. A
+  // pause can start at any point of a sweep, so a snapshot taken before the
+  // sweep would leave exactly that window open.
+  async function isCompanyPaused(companyId: string) {
+    const company = await db
+      .select({ status: companies.status })
+      .from(companies)
+      .where(eq(companies.id, companyId))
+      .then((rows) => rows[0] ?? null);
+    return company?.status === "paused";
+  }
+
   async function isInvocationBudgetBlocked(
     issue: typeof issues.$inferSelect,
     agentId: string,
@@ -4175,28 +4192,6 @@ export function recoveryService(
 
     const candidateIssueIds = candidates.map((issue) => issue.id);
 
-    // A paused company is a deliberate operator stop, not stranded work. No run
-    // can start while the pause holds, so every assigned issue looks abandoned
-    // and `getInvocationBlock` answers "over budget" for all of them. Blocking
-    // them would outlive the pause: resuming the company does not reopen a
-    // blocked issue, which has no dispatch queue, monitor or blocker of its own.
-    const pausedCompanyIds = new Set<string>();
-    const candidateCompanyIds = [
-      ...new Set(candidates.map((issue) => issue.companyId)),
-    ];
-    if (candidateCompanyIds.length > 0) {
-      const pausedCompanies = await db
-        .select({ id: companies.id })
-        .from(companies)
-        .where(
-          and(
-            inArray(companies.id, candidateCompanyIds),
-            eq(companies.status, "paused"),
-          ),
-        );
-      for (const company of pausedCompanies) pausedCompanyIds.add(company.id);
-    }
-
     const unfinishedGoalBindings = new Set<string>();
     if (candidateIssueIds.length > 0) {
       const pausedGoals = await db
@@ -4221,7 +4216,7 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
-      if (pausedCompanyIds.has(issue.companyId)) {
+      if (await isCompanyPaused(issue.companyId)) {
         result.skipped += 1;
         continue;
       }
@@ -4429,6 +4424,14 @@ export function recoveryService(
         }
       }
       if (await isInvocationBudgetBlocked(issue, agentId)) {
+        // The block can be a company pause that started after the check above,
+        // while this issue waited its turn in the sweep. A pause is not budget
+        // exhaustion, so the company is read again immediately before the
+        // escalation writes `blocked`.
+        if (await isCompanyPaused(issue.companyId)) {
+          result.skipped += 1;
+          continue;
+        }
         const classification = classifyContinuationFailure(latestRun);
         if (
           classification.kind === "deliberate_wait_without_target" ||
