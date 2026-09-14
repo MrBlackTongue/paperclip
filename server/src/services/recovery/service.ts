@@ -4174,6 +4174,29 @@ export function recoveryService(
     };
 
     const candidateIssueIds = candidates.map((issue) => issue.id);
+
+    // A paused company is a deliberate operator stop, not stranded work. No run
+    // can start while the pause holds, so every assigned issue looks abandoned
+    // and `getInvocationBlock` answers "over budget" for all of them. Blocking
+    // them would outlive the pause: resuming the company does not reopen a
+    // blocked issue, which has no dispatch queue, monitor or blocker of its own.
+    const pausedCompanyIds = new Set<string>();
+    const candidateCompanyIds = [
+      ...new Set(candidates.map((issue) => issue.companyId)),
+    ];
+    if (candidateCompanyIds.length > 0) {
+      const pausedCompanies = await db
+        .select({ id: companies.id })
+        .from(companies)
+        .where(
+          and(
+            inArray(companies.id, candidateCompanyIds),
+            eq(companies.status, "paused"),
+          ),
+        );
+      for (const company of pausedCompanies) pausedCompanyIds.add(company.id);
+    }
+
     const unfinishedGoalBindings = new Set<string>();
     if (candidateIssueIds.length > 0) {
       const pausedGoals = await db
@@ -4198,6 +4221,10 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      if (pausedCompanyIds.has(issue.companyId)) {
+        result.skipped += 1;
+        continue;
+      }
       if (issue.conversationAgentId) {
         const lastRun = await getLatestIssueRun(issue.companyId, issue.id);
         if (lastRun?.status === "succeeded") {

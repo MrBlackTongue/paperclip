@@ -12922,6 +12922,46 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(wakeups).toHaveLength(1);
   });
 
+  it("skips a stranded assigned issue while its company is paused", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "todo",
+      runStatus: "failed",
+      retryReason: "assignment_recovery",
+    });
+    await db
+      .update(companies)
+      .set({ status: "paused", pauseReason: "manual", pausedAt: new Date() })
+      .where(eq(companies.id, companyId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+    expect(result.dispatchRequeued).toBe(0);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(result.issueIds).toEqual([]);
+
+    const issue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("todo");
+    expect(issue?.assigneeAgentId).toBe(agentId);
+
+    const recoveryActions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toHaveLength(0);
+
+    const comments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+  });
+
   it("re-enqueues recovery when the latest in-progress continuation made progress but left no live path", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
