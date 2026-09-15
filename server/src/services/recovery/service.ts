@@ -2067,19 +2067,21 @@ export function recoveryService(
     return company?.status === "paused";
   }
 
+  async function readInvocationBlock(
+    issue: typeof issues.$inferSelect,
+    agentId: string,
+  ) {
+    return budgets.getInvocationBlock(issue.companyId, agentId, {
+      issueId: issue.id,
+      projectId: issue.projectId,
+    });
+  }
+
   async function isInvocationBudgetBlocked(
     issue: typeof issues.$inferSelect,
     agentId: string,
   ) {
-    const budgetBlock = await budgets.getInvocationBlock(
-      issue.companyId,
-      agentId,
-      {
-        issueId: issue.id,
-        projectId: issue.projectId,
-      },
-    );
-    return Boolean(budgetBlock);
+    return Boolean(await readInvocationBlock(issue, agentId));
   }
 
   async function reconcileUnassignedBlockingIssues() {
@@ -4423,12 +4425,13 @@ export function recoveryService(
           continue;
         }
       }
-      if (await isInvocationBudgetBlocked(issue, agentId)) {
-        // The block can be a company pause that started after the check above,
-        // while this issue waited its turn in the sweep. A pause is not budget
-        // exhaustion, so the company is read again immediately before the
-        // escalation writes `blocked`.
-        if (await isCompanyPaused(issue.companyId)) {
+      const invocationBlock = await readInvocationBlock(issue, agentId);
+      if (invocationBlock) {
+        // The block itself names its cause. A company pause can start at any
+        // moment of a sweep, and reading the company again here would answer
+        // for a later moment: a resume between the two reads would turn the
+        // pause into a false budget verdict and escalate on it.
+        if (invocationBlock.cause === "company_paused") {
           result.skipped += 1;
           continue;
         }
