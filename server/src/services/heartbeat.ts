@@ -1482,6 +1482,7 @@ export function heartbeatService(
     liveRunExecutions,
     getSchedulingSuppression,
     resumeExecutionWaitComments,
+    readmitUnblockedExecutionWaits,
     getWorktreeExecutionCutoff,
     resumeQueuedCommentInterrupt,
     resumeSavedLegacyComments,
@@ -1663,6 +1664,10 @@ export function heartbeatService(
 
   function resumeExecutionWaitComments(...args: Parameters<typeof runControl.resumeExecutionWaitComments>) {
     return runControl.resumeExecutionWaitComments(...args);
+  }
+
+  function readmitUnblockedExecutionWaits(...args: Parameters<typeof runControl.readmitUnblockedExecutionWaits>) {
+    return runControl.readmitUnblockedExecutionWaits(...args);
   }
 
   function resumeQueuedCommentInterrupt(...args: Parameters<typeof runControl.resumeQueuedCommentInterrupt>) {
@@ -7253,6 +7258,7 @@ export function heartbeatService(
     resumeRemoteStopComments,
     resumeQueuedCommentInterrupt,
     resumeExecutionWaitComments,
+    readmitUnblockedExecutionWaits,
 
     sweepStaleIssueLocks,
 
