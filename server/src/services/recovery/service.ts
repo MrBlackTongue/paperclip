@@ -22,6 +22,7 @@ import {
   issueThreadInteractions,
   issues,
   nativeRunFinalizations,
+  instanceSettings as instanceSettingsTable,
   projects,
   routineRuns,
   routines,
@@ -679,7 +680,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
   const budgets = budgetService(db);
-  const instanceSettings = instanceSettingsService(db);
   let resolvedDependencyWakeBackstopCandidateCursor: string | null = null;
 
   async function getAgent(agentId: string) {
@@ -2325,8 +2325,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .then((rows) => rows.map((row) => row.blockerIssueId));
   }
 
-  async function existingUnresolvedBlockerIssues(companyId: string, issueId: string) {
-    return db
+  async function existingUnresolvedBlockerIssues(
+    companyId: string,
+    issueId: string,
+    dbOrTx: any = db,
+    lockForShare = false,
+  ): Promise<Array<{ id: string; identifier: string | null }>> {
+    const query = dbOrTx
       .select({ id: issueRelations.issueId, identifier: issues.identifier })
       .from(issueRelations)
       .innerJoin(
@@ -2344,10 +2349,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           notInArray(issues.status, ["done", "cancelled"]),
         ),
       );
+    return lockForShare ? query.for("share") : query;
   }
 
-  async function existingUnresolvedBlockerIssueIds(companyId: string, issueId: string) {
-    return existingUnresolvedBlockerIssues(companyId, issueId).then((rows) => rows.map((row) => row.id));
+  async function existingUnresolvedBlockerIssueIds(
+    companyId: string,
+    issueId: string,
+    dbOrTx: any = db,
+    lockForShare = false,
+  ) {
+    return existingUnresolvedBlockerIssues(companyId, issueId, dbOrTx, lockForShare)
+      .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
   }
 
   async function openChildIssues(issue: typeof issues.$inferSelect) {
@@ -3116,48 +3128,37 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return scheduled ? "queued" : "skipped";
   }
 
-  // Mirror the scheduler's worktree run-execution suppression gate
-  // (`getAutomaticRoutineDispatchEligibility` in routines.ts). Outside a
-  // worktree runtime nothing is suppressed. Inside one, a firing is only
-  // dispatched when the worktree run-execution activation is `armed` and the
-  // routine was created at/after the activation cutoff; an unarmed activation,
-  // an unreadable/invalid cutoff, or a routine predating the cutoff is
-  // suppressed — the scheduler records a suppressed run and creates NO
-  // replacement firing. Returns true only when the scheduler would dispatch.
-  async function routineAutomaticDispatchWorktreeEligible(
-    routine: typeof routines.$inferSelect,
-  ): Promise<boolean> {
-    const runtimeEnv = process.env;
-    if (!isTruthyRuntimeEnvValue(runtimeEnv.PAPERCLIP_IN_WORKTREE)) return true;
-
-    const activation = await resolveWorktreeRunExecutionActivationState({
-      getExperimental: instanceSettings.getExperimental,
-      runtimeEnv,
-    });
-    if (!activation.armed) return false;
-
-    const cutoff = new Date(activation.cutoff);
-    if (Number.isNaN(cutoff.getTime()) || routine.createdAt < cutoff) return false;
-    return true;
-  }
-
   // GH #9201 (Greptile follow-up): confirm the routine behind a stranded
   // `routine_execution` firing will actually fire again before we cancel it.
   // Cancelling is only safe when a replacement firing is guaranteed to
   // regenerate the work; a one-shot, disabled, deleted, archived, or paused
   // routine would silently lose the firing with no replacement, which is worse
   // than an (un-resumable) block. A `routine_execution` issue records the
-  // routine's id in `originId`. We mirror the scheduler's own firing decision
+  // routine's id in `originId`. We mirror the scheduler's own due-query
   // (`tickScheduledTriggers` in routines.ts): a firing only recurs when the
-  // routine is `active`, it owns an `enabled` `schedule` trigger with a cron
-  // expression, a timezone, and a set `nextRunAt`, AND no scheduler suppression
-  // gate is active — a paused project or a worktree run-execution cutoff makes
-  // the scheduler claim the tick but create NO replacement firing. Conservative
-  // by construction: any missing/unknown/suppressing signal (no origin id,
-  // deleted/archived/paused routine, no enabled recurring trigger, webhook-only
-  // trigger, paused project, worktree-suppressed) returns false so the caller
-  // falls through to the existing board-escalation block path.
-  async function routineExecutionWillFireAgain(issue: typeof issues.$inferSelect): Promise<boolean> {
+  // routine is `active` and it owns an `enabled` `schedule` trigger with a cron
+  // expression, a timezone, and a set `nextRunAt`. Conservative by construction:
+  // any missing/unknown signal (no origin id, deleted/archived/paused routine,
+  // no enabled recurring trigger, webhook-only trigger) returns false so the
+  // caller falls through to the existing board-escalation block path.
+  //
+  // Greptile follow-up: an enabled trigger on an active routine is not enough.
+  // `tickScheduledTriggers` claims a due tick and then still suppresses the
+  // firing — recording a suppressed run instead of dispatching one — when the
+  // routine's project is paused, when worktree dispatch is cut off, or when a
+  // `require_external_activity` gate finds a quiet window. A suppressed firing
+  // creates no replacement execution issue, so cancelling under one discards
+  // the failed work outright. Every one of those gates is mirrored below.
+  //
+  // Reads go through `dbOrTx` and take `for share` on the routine, trigger and
+  // project rows, so the caller can run this check inside the cancelling
+  // transaction: an operator pausing the routine, disabling the trigger or
+  // pausing the project concurrently either lands before we read it or waits
+  // for our commit, instead of racing a cancellation that read stale state.
+  async function routineExecutionWillFireAgain(
+    issue: typeof issues.$inferSelect,
+    dbOrTx: any = db,
+  ): Promise<boolean> {
     if (issue.originKind !== "routine_execution") return false;
     const routineId = readNonEmptyString(issue.originId);
     if (!routineId) return false;
@@ -3172,7 +3173,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     // one-shot and must fall through to the block path. Missing origin run → false.
     const originRunId = readNonEmptyString(issue.originRunId);
     if (!originRunId) return false;
-    const firingWasScheduled = await db
+    const firingWasScheduled = await dbOrTx
       .select({ id: routineRuns.id })
       .from(routineRuns)
       .where(
@@ -3183,54 +3184,24 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ),
       )
       .limit(1)
-      .then((rows) => Boolean(rows[0]));
+      .then((rows: Array<{ id: string }>) => Boolean(rows[0]));
     if (!firingWasScheduled) return false;
 
-    // Load the routine and its project's pause state in one query, exactly like
-    // the scheduler's `leftJoin(projects, eq(routines.projectId, projects.id))`.
-    // The routine must be `active`; a missing / archived / non-active routine
-    // has no confirmed re-fire → block. We need the full routine row (its
-    // `createdAt`/`projectId`) to evaluate the suppression gates below.
-    const routineRow = await db
-      .select({ routine: routines, projectPausedAt: projects.pausedAt })
-      .from(routines)
-      .leftJoin(projects, eq(routines.projectId, projects.id))
-      .where(
-        and(
-          eq(routines.companyId, issue.companyId),
-          eq(routines.id, routineId),
-          eq(routines.status, "active"),
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (!routineRow) return false;
-
-    // Scheduler suppression gate #1 — paused project. `tickScheduledTriggers`
-    // treats `!!(routine.projectId && projects.pausedAt)` as suppressed: it
-    // claims the tick and records a suppressed run but creates no replacement
-    // firing, so cancelling would drop this firing with nothing to regenerate
-    // it. Mirror the scheduler predicate exactly. Routines with no project are
-    // never suppressed here.
-    const projectPaused = !!(routineRow.routine.projectId && routineRow.projectPausedAt);
-    if (projectPaused) return false;
-
-    // Scheduler suppression gate #2 — worktree run-execution cutoff. Same
-    // `getAutomaticRoutineDispatchEligibility` decision the scheduler applies;
-    // when it suppresses, no replacement firing is created.
-    const worktreeEligible = await routineAutomaticDispatchWorktreeEligible(routineRow.routine);
-    if (!worktreeEligible) return false;
-
-    // Finally the recurring-trigger check: the routine owns an `enabled`
-    // `schedule` trigger with a cron expression, a timezone, and a set
-    // `nextRunAt`. Only then is a replacement firing guaranteed.
-    return db
-      .select({ id: routineTriggers.id })
+    const recurring = await dbOrTx
+      .select({
+        projectId: routines.projectId,
+        routineCreatedAt: routines.createdAt,
+        activityGatePolicy: routines.activityGatePolicy,
+        concurrencyPolicy: routines.concurrencyPolicy,
+      })
       .from(routineTriggers)
+      .innerJoin(routines, eq(routineTriggers.routineId, routines.id))
       .where(
         and(
           eq(routineTriggers.companyId, issue.companyId),
           eq(routineTriggers.routineId, routineId),
+          eq(routines.companyId, issue.companyId),
+          eq(routines.status, "active"),
           eq(routineTriggers.kind, "schedule"),
           eq(routineTriggers.enabled, true),
           isNotNull(routineTriggers.cronExpression),
@@ -3239,30 +3210,125 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         ),
       )
       .limit(1)
-      .then((rows) => Boolean(rows[0]));
+      .for("share")
+      .then((rows: Array<{
+        projectId: string | null;
+        routineCreatedAt: Date;
+        activityGatePolicy: string;
+        concurrencyPolicy: string;
+      }>) => rows[0] ?? null);
+    if (!recurring) return false;
+
+    // Scheduler gate 1: `skip_if_active` cannot promise that the next tick
+    // creates replacement work. Another live execution makes the scheduler
+    // record the firing as skipped, so retain this failed artifact for the
+    // normal recovery path instead of cancelling it speculatively.
+    if (recurring.concurrencyPolicy === "skip_if_active") return false;
+
+    // Scheduler gate 2: a paused project suppresses the firing (the tick is
+    // claimed and advanced, no run is dispatched). A routine with no project is
+    // never suppressed here; a routine whose project row cannot be read is
+    // treated as suppressed.
+    if (recurring.projectId) {
+      const projectIsLive = await dbOrTx
+        .select({ pausedAt: projects.pausedAt })
+        .from(projects)
+        .where(and(eq(projects.companyId, issue.companyId), eq(projects.id, recurring.projectId)))
+        .limit(1)
+        .for("share")
+        .then((rows: Array<{ pausedAt: Date | null }>) => Boolean(rows[0]) && !rows[0].pausedAt);
+      if (!projectIsLive) return false;
+    }
+
+    // Scheduler gate 3: `require_external_activity` only dispatches when the
+    // gate sees fresh external activity in its window. A quiet window suppresses
+    // the firing, so a re-fire cannot be promised at all for these routines.
+    if (recurring.activityGatePolicy === "require_external_activity") return false;
+
+    // Scheduler gate 4: in a worktree runtime, automatic dispatch is cut off
+    // unless activation is armed and the routine predates no cutoff
+    // (`getAutomaticRoutineDispatchEligibility` in routines.ts).
+    if (isTruthyRuntimeEnvValue(process.env.PAPERCLIP_IN_WORKTREE)) {
+      const transactionalInstanceSettings = instanceSettingsService(dbOrTx as Db);
+      // Ensure the singleton exists, then lock it before the authoritative
+      // read. Disabling or re-arming worktree execution now either commits
+      // before this read or waits until the cancellation transaction commits.
+      await transactionalInstanceSettings.getExperimental();
+      const lockedSettings = await dbOrTx
+        .select({ id: instanceSettingsTable.id })
+        .from(instanceSettingsTable)
+        .where(eq(instanceSettingsTable.singletonKey, "default"))
+        .limit(1)
+        .for("share")
+        .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+      if (!lockedSettings) return false;
+      const activation = await resolveWorktreeRunExecutionActivationState({
+        // Keep the post-lock read on this transaction. Reading through the
+        // service's outer database handle would escape the lock's snapshot and
+        // could observe the pre-disable activation while the writer waits.
+        getExperimental: () => transactionalInstanceSettings.getExperimental(),
+      });
+      if (!activation.armed) return false;
+      const cutoff = new Date(activation.cutoff);
+      if (Number.isNaN(cutoff.getTime()) || recurring.routineCreatedAt < cutoff) return false;
+    }
+
+    return true;
   }
 
   // GH #9201: cancel a `routine_execution` firing whose run died and exhausted
   // recovery instead of parking it in an un-resumable `blocked`. Returns the
-  // cancelled row, or null when the transition could not be applied (the caller
-  // then falls back to the normal block path). Provider-quota waits and issues
-  // with real blockers are filtered out by the caller.
+  // cancelled row, the newer row when the recovery snapshot became stale, or
+  // null when eligibility failed and the caller must use the normal block path.
+  // Provider-quota waits and issues with real blockers are filtered out by the
+  // caller.
   async function cancelStrandedRoutineExecution(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
     recoveryCause: StrandedRecoveryCause;
   }) {
+    // Greptile follow-up: decide eligibility and apply the cancellation in one
+    // transaction. The issue row is locked and its status re-checked against the
+    // status recovery observed. Blockers are then re-read under that lock, while
+    // `routineExecutionWillFireAgain` takes `for share` on the routine, trigger,
+    // project and instance-settings rows. Neither issue dependencies nor the
+    // schedule gates can move between the checks and the write. A changed issue
+    // disposition or execution identity is returned untouched, while a failed
+    // eligibility check falls through to the pre-existing board-escalation path.
+    //
     // Clear the execution-lock columns as we finalize so the cancelled artifact
     // does not linger as an "open" routine execution holding the run pointer.
-    const updated = await issuesSvc.update(input.issue.id, {
-      status: "cancelled",
-      executionRunId: null,
-      executionAgentNameKey: null,
-      executionLockedAt: null,
-      checkoutRunId: null,
+    const transition = await db.transaction(async (tx) => {
+      const locked = await issuesSvc.getByIdForUpdate(input.issue.id, tx);
+      if (!locked) return null;
+      if (
+        locked.status !== input.previousStatus ||
+        locked.checkoutRunId !== input.issue.checkoutRunId ||
+        locked.executionRunId !== input.issue.executionRunId
+      ) {
+        return { kind: "stale" as const, issue: locked };
+      }
+      const blockerIds = await existingUnresolvedBlockerIssueIds(
+        input.issue.companyId,
+        input.issue.id,
+        tx,
+        true,
+      );
+      if (blockerIds.length > 0) return null;
+      if (!(await routineExecutionWillFireAgain(locked, tx))) return null;
+      const updated = await issuesSvc.update(input.issue.id, {
+        status: "cancelled",
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        checkoutRunId: null,
+      }, tx);
+      return { kind: "cancelled" as const, issue: updated };
     });
-    if (!updated) return null;
+    if (!transition) return null;
+    if (transition.kind === "stale") return transition.issue;
+    const updated = transition.issue;
 
     const failureSummary = summarizeRunFailureForIssueComment(input.latestRun)?.trim() ?? null;
     await issuesSvc.addComment(
@@ -3341,7 +3407,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     const recoveryCause = resolveStrandedRecoveryCause(input.latestRun, input.recoveryCause);
-    const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
 
     // GH #9201: a `routine_execution` firing that dies at the infra level and
     // exhausts recovery must not be parked in an un-resumable `blocked` with an
@@ -3357,16 +3422,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     // live, monitored retry path.
     //
     // Greptile follow-up: only cancel when the routine is confirmed to fire
-    // again (an enabled recurring schedule trigger on an active routine). A
-    // one-shot, disabled, deleted, archived, or paused routine has no
-    // replacement firing, so cancelling would lose the work outright — worse
-    // than a block. When a re-fire cannot be confirmed we fall through to the
-    // pre-existing board-escalation block path.
+    // again (an enabled recurring schedule trigger on an active routine whose
+    // next firing no scheduler gate suppresses). A one-shot, disabled, deleted,
+    // archived, paused or gate-suppressed routine has no replacement firing, so
+    // cancelling would lose the work outright — worse than a block. That check
+    // runs inside `cancelStrandedRoutineExecution`'s transaction so it cannot go
+    // stale before the write; when a re-fire cannot be confirmed the helper
+    // returns null and we fall through to the pre-existing board-escalation
+    // block path.
     if (
       input.issue.originKind === "routine_execution" &&
-      recoveryCause !== "provider_quota" &&
-      blockerIds.length === 0 &&
-      (await routineExecutionWillFireAgain(input.issue))
+      recoveryCause !== "provider_quota"
     ) {
       const cancelled = await cancelStrandedRoutineExecution({
         issue: input.issue,
@@ -3377,6 +3443,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       if (cancelled) return cancelled;
     }
 
+    const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
