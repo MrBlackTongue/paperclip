@@ -24,7 +24,7 @@ use crate::qualified_launch::verify_launch_artifact;
 use crate::question_response::validate_question_response;
 
 pub const CODEX_APP_SERVER_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const QUALIFIED_OPENCODE_VERSION: &str = "1.18.29";
+const QUALIFIED_OPENCODE_VERSION: &str = "1.18.32";
 const DEFAULT_PROVIDER_TRACE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BUFFERED_MESSAGES: usize = 1_024;
 const MAX_BUFFERED_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -3383,8 +3383,18 @@ fn classify_notification_thread(
             "Codex notification has malformed turn identity",
         ));
     }
-    // This connection-level notification carries no task authority. Codex can
-    // emit it while loading skills during the first turn.
+    // Account and skill updates describe the provider connection, not a task.
+    // Codex can emit them during startup or credential refresh without thread
+    // or turn IDs. Never let them acquire execution authority or expose their
+    // account payload as task output.
+    if matches!(method, "account/updated" | "account/login/completed") {
+        if contains_provider_work_binding(params) {
+            return Err(LocalRunnerError::invalid(
+                "Codex account notification contains execution identity",
+            ));
+        }
+        return Ok(NotificationThread::UnrelatedInformation);
+    }
     if method == "skills/changed" && !contains_provider_work_binding(params) {
         return Ok(NotificationThread::UnrelatedInformation);
     }
@@ -4983,6 +4993,38 @@ mod notification_identity_tests {
                 &params
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn account_notifications_are_connection_information_without_execution_authority() {
+        for (method, params) in [
+            (
+                "account/updated",
+                json!({"authMode":"chatgpt", "planType":"pro"}),
+            ),
+            (
+                "account/login/completed",
+                json!({"loginId":null, "success":true, "error":null}),
+            ),
+        ] {
+            assert_eq!(
+                classify_notification_thread(method, "root", &BTreeSet::new(), &params).unwrap(),
+                NotificationThread::UnrelatedInformation
+            );
+            for invalid in [
+                json!({"threadId":"other"}),
+                json!({"turnId":"unbound"}),
+                json!({"itemId":"unbound"}),
+                json!({"nested":{"request":{"id":"unbound"}}}),
+                json!({"threadId":7}),
+                json!({"threadId":"root", "thread":{"id":"other"}}),
+            ] {
+                assert!(
+                    classify_notification_thread(method, "root", &BTreeSet::new(), &invalid)
+                        .is_err()
+                );
+            }
         }
     }
 

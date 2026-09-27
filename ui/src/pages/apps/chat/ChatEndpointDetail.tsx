@@ -1,3 +1,4 @@
+import { SlackToolsSettings, SlackSearchAccess } from "./SlackToolSettings";
 import { defaultSlackAppName } from "./slack-app-name";
 import { ChatCommunicationInstructions } from "./ChatCommunicationInstructions";
 import { SlackAvatarSettings } from "./SlackAvatarStep";
@@ -425,6 +426,7 @@ function Settings({
               avatarUrl={agentAvatarUrl(resolveAgentAppearance(avatarAgent.data?.appearance, endpoint.assignedAgentId), 512, 1, "rest")}
             />
       )}
+      {endpoint.provider === "slack" && <SlackToolsSettings companyId={endpoint.companyId} endpointId={endpointId} connectionId={endpoint.connectionId} />}
       {endpoint.provider === "slack" && <ChatCommunicationInstructions
         key={endpoint.id}
         value={endpoint.communicationInstructions ?? ""}
@@ -617,6 +619,7 @@ function Access({
       <div>
         <h2 className="text-lg font-semibold">External identity access</h2>
       </div>
+      {endpoint.provider === "slack" && <SlackSearchAccess companyId={endpoint.companyId} endpointId={endpointId} />}
       {endpoint.provider === "slack" && (
         <div className="space-y-3">
           <h3 className="text-sm font-semibold">Invite others to connect their Slack accounts</h3>

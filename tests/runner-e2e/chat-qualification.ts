@@ -63,6 +63,9 @@ export function assertCrashRecovered(e: {
   expect(e.runs.find(r => r.id === e.failed.id)).toMatchObject({ status: "failed", contextSnapshot: { issueId: e.issueId } });
   const retry = e.runs.find(r => r.id !== e.failed.id)!;
   expect(retry).toMatchObject({ agentId: e.failed.agentId, status: "succeeded", runtimeMode: "native", contextSnapshot: { issueId: e.issueId } });
+  expect(retry.contextSnapshot).toMatchObject({ previousRunId: e.failed.id, forceFreshSession: true });
+  expect((retry as Row).nativeSessionId).not.toBe(e.failed.nativeSessionId);
+  expect((retry as Row).nativeSessionId).toBeTruthy();
   expect(e.comments.filter(c => !c.authorAgentId && c.body === e.prompt)).toHaveLength(1);
   const replies = e.comments.filter(c => c.authorAgentId && c.body.includes(e.marker));
   expect(replies).toHaveLength(1);
@@ -145,7 +148,7 @@ export async function runWorkerCrash(context: Context) {
     const processIdentity = JSON.parse(execFileSync("python3", [faultHelper, "inspect", String(boundary.processPid), boundary.id], { encoding: "utf8" }));
     const command = execFileSync("ps", ["-p", String(boundary.processPid), "-o", "command="], { encoding: "utf8" });
     assertWorkerIdentity(boundary, command, input.execution.environment.id);
-    await input.evidence("chat-worker-fault.json", { boundary, planBefore, processIdentity, fault: "SIGKILL through verified Linux pidfd", recovery: "visible Retry button" });
+    await input.evidence("chat-worker-fault.json", { boundary, planBefore, processIdentity, fault: "SIGKILL through verified Linux pidfd", recovery: "new user message after verified provider cleanup" });
     const fault = JSON.parse(execFileSync("python3", [faultHelper, "kill", String(boundary.processPid), boundary.id, processIdentity.startTicks], { encoding: "utf8" }));
     expect(fault.signalled).toBe(true);
     await input.evidence("chat-worker-fault-delivered.json", fault);
@@ -156,10 +159,11 @@ export async function runWorkerCrash(context: Context) {
     let failed: Row = {};
     await expect.poll(async () => {
       failed = await input.api.get<Row>(`/api/heartbeat-runs/${boundary.id}`);
-      return ["failed", "recovery_needed"].includes(failed.execution?.phase);
+      return failed.status === "failed" && failed.finishedAt && failed.nativePhase === "terminal_failure" &&
+        ["failed", "recovery_needed"].includes(failed.execution?.phase);
     }, { timeout: 120_000 }).toBe(true);
     await input.evidence("chat-worker-settled-failure.json", failed);
-    await input.capture("worker-failed", "Worker loss before user Retry", "worker-failed.png");
+    await input.capture("worker-failed", "Worker loss before a fresh user turn", "worker-failed.png");
     await writeFile(wait.gate, reference);
     if (failed.errorCode === "native_session_cleanup_quarantined") {
       // Preserve the red qualification result, but verify the stop is honest:
@@ -167,7 +171,7 @@ export async function runWorkerCrash(context: Context) {
       await input.page.reload({ waitUntil: "domcontentloaded" });
       await expect(input.page.getByTestId("task-chat-composer-input")).toBeVisible();
       await expect(input.page.getByRole("status", { name: "Task recovery" }).getByRole("link", { name: "Inspect run" })).toBeVisible();
-      await expect(input.page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+      await expect(input.page.getByRole("button", { name: /^(Retry|Try again)$/ })).toHaveCount(0);
       const refused = await input.api.request.post(`/api/agents/${input.fixtures.agent.id}/wakeup`, {
         data: { failedRunId: failed.id, reason: "retry_failed_run" },
       });
@@ -177,23 +181,22 @@ export async function runWorkerCrash(context: Context) {
       await input.evidence("chat-worker-quarantine.json", { failed, retryStatus: refused.status(), savedPlanPreserved: true,
         usableRecovery: false, classification: "product recovery boundary; no provider retry was admitted" });
       await input.capture("worker-quarantined", "Worker recovery requires reconciliation", "worker-quarantined.png");
-      throw new Error("worker_crash_recovery_unqualified: native_session_cleanup_quarantined requires explicit reconciliation; generic Retry is correctly unavailable");
+      // Reconcile the fixture's known outcomes through ordinary user input.
+      // The saved plan is verified above; the only interrupted command reads a
+      // local brief. The new provider must discover its reference from the file.
+      await sendChatMessage(input.page, `The prior worker failed. The plan is already saved and must remain unchanged. The interrupted command only waited for my local brief, which is now available. Continue in a fresh conversation turn: read the brief using node ${wait.scriptPath}, then reply with its reference and ${marker}. Do not create tasks or projects.`);
     }
-    const retry = input.page.getByRole("button", { name: "Retry", exact: true });
-    await expect(retry).toHaveCount(1, { timeout: 60_000 });
-    const [retryResponse] = await Promise.all([
-      input.page.waitForResponse(response => response.request().method() === "POST" &&
-        new URL(response.url()).pathname === `/api/agents/${input.fixtures.agent.id}/wakeup`),
-      retry.click(),
-    ]);
-    await input.evidence("chat-worker-retry-response.json", { status: retryResponse.status(), body: await retryResponse.json() });
-    expect(retryResponse.ok(), "The visible Retry must admit an attempt before waiting for its result").toBe(true);
+    else {
+      throw new Error(`worker_crash_unexpected_recovery_boundary: ${failed.errorCode}`);
+    }
     await context.idle(2);
     const e = { boundary, failed, runs: await context.allRuns(), issueId: context.issue().id,
       prompt, comments: await context.comments(), reference, marker, planBefore,
       planAfter: await input.api.get<Row>(`/api/issues/${context.issue().id}/documents/plan`) };
     await input.evidence("chat-worker-recovery.json", e);
     assertCrashRecovered(e);
+    // A fresh success must not re-enable Retry on the quarantined historical run.
+    await expect(input.page.getByTestId("task-chat-run-failed-try-again")).toHaveCount(0);
     expect(await input.api.get(`/api/companies/${input.fixtures.company.id}/issues`)).toEqual([]);
   } finally {
     await writeFile(wait.gate, reference);

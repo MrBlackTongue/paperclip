@@ -115,7 +115,7 @@ export function toolActionDeliveryService(
         )
         .limit(1);
       if (pending) return false;
-      const outcomes = await tx
+      const readyOutcomes = await tx
         .select({
           receipt: toolActionDeliveries,
           receiptCreatedAtText: sql<string>`${toolActionDeliveries.createdAt}::text`,
@@ -163,7 +163,14 @@ export function toolActionDeliveryService(
           asc(toolActionDeliveries.createdAt),
           asc(toolActionDeliveries.actionRequestId),
         );
-      if (!outcomes.length) return false;
+      if (!readyOutcomes.length) return false;
+      // A task can have reviews from different external conversations. Never
+      // combine their results into a wake that would publish to only one origin.
+      const sourceOutcome = readyOutcomes.find((row) => row.request.id === source.actionRequestId);
+      if (!sourceOutcome) return false;
+      const outcomes = readyOutcomes.filter(
+        (row) => row.invocation.runId === sourceOutcome.invocation.runId,
+      );
       const sourceRunIds = outcomes.flatMap((row) =>
         row.invocation.runId ? [row.invocation.runId] : [],
       );
@@ -297,6 +304,7 @@ export function toolActionDeliveryService(
           triggerDetail: "system",
           reason: "issue_commented",
           idempotencyKey,
+          allowRunCoalescing: false,
           issueStateGuard: {
             statuses: [issue.status],
             assigneeAgentId: agent.id,

@@ -24,6 +24,11 @@ const expectStaleContinuation = async (
   await expect(run()).rejects.toThrow(StaleExecutionContinuationError);
   await expect(run()).rejects.toMatchObject({ code });
 };
+const expectMissingContinuationContext = async (run: () => Promise<unknown>) => {
+  const result = run();
+  await expect(result).rejects.toThrow("continuation_source_context_missing");
+  await expect(result).rejects.not.toBeInstanceOf(StaleExecutionContinuationError);
+};
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)(
   "authorized continuation context",
@@ -182,10 +187,9 @@ const support = await getEmbeddedPostgresTestSupport();
       const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
       await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: randomUUID() } }).where(eq(heartbeatRuns.id, runId));
       try {
-        await expectStaleContinuation(
+        await expectMissingContinuationContext(
           () => buildExecutionContinuation({ db, companyId, issueId, agentId,
             context: { interruptedRunId: runId }, summary: null, exposeLowTrustRaw: false }),
-          "continuation_source_context_missing",
         );
       } finally {
         await db.update(heartbeatRuns).set({ contextSnapshot: source.contextSnapshot }).where(eq(heartbeatRuns.id, runId));
@@ -346,7 +350,7 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(freshPrompt).not.toContain('"resumeDelta"');
     });
     it("fails closed when required originating context is missing", async () => {
-      await expectStaleContinuation(
+      await expectMissingContinuationContext(
         () =>
           buildExecutionContinuation({
             db,
@@ -357,8 +361,24 @@ const support = await getEmbeddedPostgresTestSupport();
             summary: null,
             exposeLowTrustRaw: false,
           }),
-        "continuation_source_context_missing",
       );
+    });
+    it.each(["done", "cancelled"])("rejects continuation after the task becomes %s", async (status) => {
+      await db.update(issues).set({ status }).where(eq(issues.id, issueId));
+      try {
+        await expectStaleContinuation(
+          () => buildExecutionContinuation({
+            db, companyId, issueId, agentId,
+            context: { wakeReason: "issue_commented", commentId: gmailId },
+            summary: null, exposeLowTrustRaw: false,
+          }),
+          "continuation_task_ownership_changed",
+        );
+        const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+        expect(issue).toMatchObject({ status, assigneeAgentId: agentId });
+      } finally {
+        await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issueId));
+      }
     });
     it("rejects another company and an invalidated task owner", async () => {
       await expectStaleContinuation(

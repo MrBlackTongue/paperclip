@@ -1,3 +1,4 @@
+import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
 import { dismissAutomaticCompletionReviews } from "./automatic-completion-reviews.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-review-participant.js";
 import { conversationNativeDecision, isConversation } from "../agent-conversations.js";
@@ -1039,6 +1040,11 @@ export async function finalizeNativeRun(input: {
         issueId: coordinator.issueId,
         runId: run.id,
       });
+    if (input.projectRunStatus) {
+      await settleSlackConversation(input.db, run.companyId, coordinator.issueId).catch((err) => {
+        logger.warn({ err, runId: run.id }, "Slack conversation settlement deferred to reconciliation");
+      });
+    }
     return coordinator;
   }
   const [resultRow, contractRow] = await Promise.all([
@@ -1363,6 +1369,11 @@ export async function finalizeNativeRun(input: {
           issueId: coordinator.issueId,
           runId: run.id,
         });
+      if (input.projectRunStatus && finalizationPhase === "committed") {
+        await settleSlackConversation(input.db, run.companyId, coordinator.issueId).catch((err) => {
+          logger.warn({ err, runId: run.id }, "Slack conversation settlement deferred to reconciliation");
+        });
+      }
       return {
         ...coordinator,
         phase: finalizationPhase,

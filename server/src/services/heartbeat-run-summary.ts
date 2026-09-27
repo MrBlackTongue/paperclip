@@ -184,11 +184,20 @@ function record(value: unknown): Record<string, unknown> {
 
 export function isExternalChatPresentationContext(
   contextSnapshot: unknown,
+  verifiedToolReviewChatOrigin = false,
 ): boolean {
   const context = record(contextSnapshot);
   const wake = record(context.paperclipWake);
   const source =
     typeof context.source === "string" ? context.source.trim() : "";
+  // Approvals and Board comments also resume ordinary internal tasks. Only
+  // durable source-run or mirrored-comment proof authorizes an external reply.
+  if (
+    source === "tool_action_review" ||
+    source.startsWith("issue.comment") ||
+    source === "issue.update"
+  )
+    return verifiedToolReviewChatOrigin;
   return (
     source.startsWith("chat:") ||
     context.externalChatContinuation === true ||

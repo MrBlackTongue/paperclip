@@ -4565,7 +4565,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                       ? "opencode_server"
                       : "codex_app_server",
                   providerVersion:
-                    provider === "opencode" ? "1.18.29" : "codex-app-server-v1",
+                    provider === "opencode" ? "1.18.32" : "codex-app-server-v1",
                   command:
                     provider === "opencode"
                       ? providerNodeCommand

@@ -1,3 +1,4 @@
+import * as nativeExecutor from "./native-runtime/native-session-executor.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { recordNativeLocalProcessStop, hasNativeLocalProcessStop, PROCESS_START_REQUESTED } from "./native-local-process-stop.js";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -374,6 +375,32 @@ const support = await getEmbeddedPostgresTestSupport();
     return result;
   });
 
+  it.each(["verified", "unproven", "changed", "dry_run", "retry", "duplicate"])(
+    "requires exact local cleanup for a new turn after worker loss (%s)", async mode => {
+      const f = await seed();
+      await db.update(heartbeatRuns).set({ errorCode: "native_session_cleanup_quarantined" }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      const retire = vi.fn(() => mode !== "changed");
+      const verify = vi.spyOn(nativeExecutor, "verifyStoppedNativeSessionForContinuation").mockResolvedValue(
+        mode === "unproven" ? null : { evidence: { runId: f.sourceRunId, schema: "paperclip.stopped_native_conversation.v1" }, retire });
+      try {
+        const result = mode === "retry"
+          ? await db.transaction(tx => admitExplicitNativeContinuation({ ...f, db: tx as unknown as typeof db,
+              reason: "retry_failed_run", failedRunId: f.sourceRunId }))
+          : await admit(f, mode === "dry_run");
+        expect(Boolean(result)).toBe(["verified", "dry_run", "duplicate"].includes(mode));
+        expect(retire).toHaveBeenCalledTimes(["verified", "changed", "duplicate"].includes(mode) ? 1 : 0);
+        const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+        expect(Boolean(actions[0].evidence.explicitUserContinuation)).toBe(["verified", "duplicate"].includes(mode));
+        const events = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, f.sourceRunId),
+          eq(heartbeatRunEvents.eventType, "native.stopped_conversation_verified")));
+        expect(events).toHaveLength(["verified", "duplicate"].includes(mode) ? 1 : 0);
+        if (mode === "duplicate") {
+          expect(await admit(f)).toBeNull();
+          expect(retire).toHaveBeenCalledTimes(1);
+        }
+      } finally { verify.mockRestore(); }
+    });
+
   it.each(["suspended", "ready", "wrong_run", "wrong_thread", "active_provider", "pending_tool", "pending_output", "missing_state", "new_launch"])(
     "recovers a historical run without process metadata only from exact suspended state (%s)", async kind => {
       const f = await seed();
@@ -614,6 +641,25 @@ const support = await getEmbeddedPostgresTestSupport();
     const [adopted] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, waiting.id));
     expect(adopted).toMatchObject({ status: "coalesced", runId: runs[0].id });
     expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+  });
+
+
+  it.each(["issue_commented", "retry_failed_run"])("does not bypass an unsafe restore hold through %s", async reason => {
+    const f = await seed();
+    await db.update(agents).set({ adapterType: "grok_local" }).where(eq(agents.id, f.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: null,
+      errorCode: "workspace_restore_failed", resultJson: { workspaceRestoreFailure: "restore_unsafe_archive", conversationContinuation: "continue_conversation_v1" },
+    }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
+    await db.update(issueRecoveryActions).set({ cause: "legacy_execution_requires_reconciliation" }).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    const blocked = vi.fn();
+    expect(await db.transaction(tx => admitExplicitNativeContinuation({ ...f, reason,
+      commentId: reason === "issue_commented" ? f.commentId : null,
+      failedRunId: reason === "retry_failed_run" ? f.sourceRunId : null,
+      onBlocked: blocked, db: tx as unknown as typeof db,
+    }))).toBeNull();
+    expect(blocked).toHaveBeenCalledWith("workspace_repair_required", expect.any(String));
+    expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: f.sourceRunId });
   });
 
   it.each(["issue_commented", "retry_failed_run"])("continues a legacy Daytona run lost before adapter.invoke: %s", async reason => {
