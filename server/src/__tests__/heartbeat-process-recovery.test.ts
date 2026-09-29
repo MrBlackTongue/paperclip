@@ -7866,8 +7866,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(sourceAttemptSix).toHaveLength(0);
   });
 
-  it("routes a non-invokable source owner to recovery without reassigning the source", async () => {
-    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+  it("holds a paused source owner, then recovers its deliberate wait after resume", async () => {
+    const { agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "cancelled",
       retryReason: "issue_continuation_needed",
@@ -7878,8 +7878,17 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .set({ status: "paused" })
       .where(eq(agents.id, agentId));
 
-    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
-    expect(result.escalated).toBe(1);
+    const heartbeat = heartbeatService(db);
+    const held = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(held.escalated).toBe(0);
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]?.status).toBe("in_progress");
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
+
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+    expect(result.continuationRequeued).toBe(1);
+    expect(result.dispositionRepairRequeued).toBe(1);
 
     const sourceIssue = await db
       .select()
@@ -7887,30 +7896,20 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(sourceIssue).toMatchObject({
-      status: "blocked",
+      status: "in_progress",
       assigneeAgentId: agentId,
     });
 
     const action = await db
       .select()
       .from(issueRecoveryActions)
-      .where(
-        and(
-          eq(issueRecoveryActions.companyId, companyId),
-          eq(issueRecoveryActions.sourceIssueId, issueId),
-        ),
-      )
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))
       .then((rows) => rows[0] ?? null);
     expect(action).toMatchObject({
       kind: "deliberate_wait_without_target",
       status: "active",
-      ownerType: "board",
-      ownerAgentId: null,
-      previousOwnerAgentId: agentId,
-      returnOwnerAgentId: agentId,
-      attemptCount: 0,
-      maxAttempts: null,
-      resolutionNote: "owner_not_invokable",
+      ownerType: "agent",
+      ownerAgentId: agentId,
     });
   });
 
