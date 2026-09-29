@@ -8029,6 +8029,10 @@ it.each([
   });
   await withPreparedOpenCodeCleanup({
     run: async () => {
+      // The launch profile is verified when the session opens, after transport
+      // setup. Keep the fixture qualified at that boundary as well.
+      await chmod(proxy, 0o755);
+      expect((await stat(proxy)).mode & 0o022).toBe(0);
       session = await driver.openSession({ runId: "prepared-opencode", normalizedSessionId: "prepared-opencode", workingDirectory: root });
       expect(bundle.transport.supportsTurnReasoning?.()).toBe(supportsReasoning);
       const firstTurn = { message: { role: "user" as const, text: prepared } };
