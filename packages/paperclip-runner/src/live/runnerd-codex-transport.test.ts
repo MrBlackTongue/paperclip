@@ -7512,6 +7512,10 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
   });
   await withPreparedOpenCodeCleanup({
     run: async () => {
+      // The launch profile is verified when the session opens, after transport
+      // setup. Keep the fixture qualified at that boundary as well.
+      await chmod(proxy, 0o755);
+      expect((await stat(proxy)).mode & 0o022).toBe(0);
       session = await driver.openSession({ runId: "prepared-opencode", normalizedSessionId: "prepared-opencode", workingDirectory: root });
       await session.startTurn({ message: { role: "user", text: prepared } });
       for await (const event of session.events()) {
