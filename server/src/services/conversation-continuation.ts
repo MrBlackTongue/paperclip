@@ -105,16 +105,16 @@ export async function persistedConversationProcessLiveness(
   },
 ): Promise<{ pidAlive: boolean; groupAlive: boolean }> {
   let pidAlive = run.processPid !== null && probes.isAlive(run.processPid);
-  let pidReused = false;
   if (pidAlive && run.processStartedAt) {
-    // A group led by this PID has also changed identity when the PID was reused.
-    // An unreadable start time remains an unknown owner and keeps the hold.
+    // A reused PID does not prove that its old process group has ended: a
+    // descendant may still be running in it. Keep the independent group probe.
     const observed = await probes.startedAt(run.processPid!).catch(() => null);
-    pidReused = observed !== null && new Date(observed).getTime() !== run.processStartedAt.getTime();
-    if (pidReused) pidAlive = false;
+    // ps reports whole seconds and a spawn callback may have supplied the
+    // timestamp when the first start-time read failed.
+    if (observed !== null && Math.abs(new Date(observed).getTime() - run.processStartedAt.getTime()) >= 5_000)
+      pidAlive = false;
   }
-  const groupAlive = run.processGroupId !== null && probes.isAlive(-run.processGroupId)
-    && !(pidReused && run.processGroupId === run.processPid);
+  const groupAlive = run.processGroupId !== null && probes.isAlive(-run.processGroupId);
   return { pidAlive, groupAlive };
 }
 
