@@ -8,8 +8,8 @@ describe("persisted conversation process ownership", () => {
     processStartedAt: new Date("2026-09-30T06:30:00.000Z"),
   };
 
-  it("does not hold a terminal run when both its PID and group number were reused", async () => {
-    const isAlive = vi.fn().mockReturnValue(true);
+  it("does not hold a terminal run when its PID was reused and its group is gone", async () => {
+    const isAlive = vi.fn((pid: number) => pid > 0);
     const startedAt = vi.fn().mockResolvedValue("2026-09-30T10:00:00.000Z");
     await expect(persistedConversationProcessLiveness(stored, { isAlive, startedAt }))
       .resolves.toEqual({ pidAlive: false, groupAlive: false });
@@ -24,10 +24,17 @@ describe("persisted conversation process ownership", () => {
     })).resolves.toEqual({ pidAlive: true, groupAlive: true });
   });
 
-  it("keeps a different live group when only the PID is known to be reused", async () => {
-    await expect(persistedConversationProcessLiveness({ ...stored, processGroupId: 60000 }, {
+  it("keeps a live group after its leader PID is reused", async () => {
+    await expect(persistedConversationProcessLiveness(stored, {
       isAlive: () => true,
       startedAt: async () => "2026-09-30T10:00:00.000Z",
     })).resolves.toEqual({ pidAlive: false, groupAlive: true });
+  });
+
+  it("keeps a live PID when its recorded timestamp differs by less than five seconds", async () => {
+    await expect(persistedConversationProcessLiveness(stored, {
+      isAlive: () => true,
+      startedAt: async () => "2026-09-30T06:30:03.000Z",
+    })).resolves.toEqual({ pidAlive: true, groupAlive: true });
   });
 });
