@@ -7479,7 +7479,7 @@ it("preserves prepared input through runnerd and the real OpenCode proxy boundar
   await chmod(proxy, 0o755);
   // The CI Node executable may itself be group-writable. Qualify a private
   // copy because the runner verifies the interpreter as the proxy command.
-  const providerNode = join(root, "provider-node");
+  const providerNode = join(root, "node");
   await cp(process.execPath, providerNode);
   await chmod(providerNode, 0o755);
   const digest = (file: string) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
