@@ -97,6 +97,27 @@ function processMayBeAlive(pid: number): boolean {
   }
 }
 
+export async function persistedConversationProcessLiveness(
+  run: { processPid: number | null; processGroupId: number | null; processStartedAt: Date | null },
+  probes: { isAlive: (pid: number) => boolean; startedAt: (pid: number) => Promise<string | null> } = {
+    isAlive: processMayBeAlive,
+    startedAt: readProcessStartedAt,
+  },
+): Promise<{ pidAlive: boolean; groupAlive: boolean }> {
+  let pidAlive = run.processPid !== null && probes.isAlive(run.processPid);
+  let pidReused = false;
+  if (pidAlive && run.processStartedAt) {
+    // A group led by this PID has also changed identity when the PID was reused.
+    // An unreadable start time remains an unknown owner and keeps the hold.
+    const observed = await probes.startedAt(run.processPid!).catch(() => null);
+    pidReused = observed !== null && new Date(observed).getTime() !== run.processStartedAt.getTime();
+    if (pidReused) pidAlive = false;
+  }
+  const groupAlive = run.processGroupId !== null && probes.isAlive(-run.processGroupId)
+    && !(pidReused && run.processGroupId === run.processPid);
+  return { pidAlive, groupAlive };
+}
+
 /** A terminal conversation row does not prove that its execution authority ended.
  * Other adapters keep their existing bootstrap and ownership protocols.
  */
@@ -136,14 +157,7 @@ export async function getConversationOwnershipBlocker(db: Db, companyId: string,
       // A separate local lease keeps the existing host process checks below.
       if (leases.every(lease => lease.provider !== "local")) continue;
     }
-    let pidAlive = run.processPid !== null && processMayBeAlive(run.processPid);
-    if (pidAlive && run.processStartedAt) {
-      // A recycled PID cannot keep an old task blocked. An unreadable identity
-      // stays conservative; the original process may still own execution.
-      const observed = await readProcessStartedAt(run.processPid!).catch(() => null);
-      if (observed && new Date(observed).getTime() !== run.processStartedAt.getTime()) pidAlive = false;
-    }
-    const groupAlive = run.processGroupId !== null && processMayBeAlive(-run.processGroupId);
+    const { pidAlive, groupAlive } = await persistedConversationProcessLiveness(run);
     if (pidAlive || groupAlive || leaseHeld) {
       return {
         runId: run.id,
