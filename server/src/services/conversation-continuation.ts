@@ -112,7 +112,7 @@ async function processGroupMembers(groupId: number): Promise<Array<{ pid: number
 }
 
 export async function persistedConversationProcessLiveness(
-  run: { processPid: number | null; processGroupId: number | null; processStartedAt: Date | null },
+  run: { processPid: number | null; processGroupId: number | null; processStartedAt: Date | null; finishedAt?: Date | null },
   probes: { isAlive: (pid: number) => boolean; startedAt: (pid: number) => Promise<string | null>;
     groupMembers?: (groupId: number) => Promise<Array<{ pid: number; startedAt: string }> | null> } = {
     isAlive: processMayBeAlive,
@@ -128,7 +128,11 @@ export async function persistedConversationProcessLiveness(
     const observed = await probes.startedAt(run.processPid!).catch(() => null);
     // ps reports whole seconds and a spawn callback may have supplied the
     // timestamp when the first start-time read failed.
-    if (observed !== null && Math.abs(new Date(observed).getTime() - run.processStartedAt.getTime()) >= 5_000) {
+    const observedTime = observed === null ? NaN : new Date(observed).getTime();
+    const startedAfterRunEnded = run.finishedAt !== null && run.finishedAt !== undefined &&
+      observedTime > run.finishedAt.getTime();
+    if (Number.isFinite(observedTime) &&
+        (Math.abs(observedTime - run.processStartedAt.getTime()) >= 5_000 || startedAfterRunEnded)) {
       pidReused = true;
       pidAlive = false;
     }

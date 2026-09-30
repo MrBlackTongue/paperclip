@@ -52,4 +52,15 @@ describe("persisted conversation process ownership", () => {
       startedAt: async () => "2026-09-30T06:30:03.000Z",
     })).resolves.toEqual({ pidAlive: true, groupAlive: true });
   });
+
+  it("releases a rapidly reused PID when it started after the terminal run ended", async () => {
+    await expect(persistedConversationProcessLiveness({
+      ...stored,
+      finishedAt: new Date("2026-09-30T06:30:01.000Z"),
+    }, {
+      isAlive: () => true,
+      startedAt: async () => "2026-09-30T06:30:03.000Z",
+      groupMembers: async () => [{ pid: 49773, startedAt: "2026-09-30T06:30:03.000Z" }],
+    })).resolves.toEqual({ pidAlive: false, groupAlive: false });
+  });
 });
