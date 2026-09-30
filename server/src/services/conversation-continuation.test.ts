@@ -28,7 +28,22 @@ describe("persisted conversation process ownership", () => {
     await expect(persistedConversationProcessLiveness(stored, {
       isAlive: () => true,
       startedAt: async () => "2026-09-30T10:00:00.000Z",
+      groupMembers: async () => [
+        { pid: 49773, startedAt: "2026-09-30T10:00:00.000Z" },
+        { pid: 49774, startedAt: "2026-09-30T06:30:01.000Z" },
+      ],
     })).resolves.toEqual({ pidAlive: false, groupAlive: true });
+  });
+
+  it("releases a reused process group only when all members belong to its new leader", async () => {
+    await expect(persistedConversationProcessLiveness(stored, {
+      isAlive: () => true,
+      startedAt: async () => "2026-09-30T10:00:00.000Z",
+      groupMembers: async () => [
+        { pid: 49773, startedAt: "2026-09-30T10:00:00.000Z" },
+        { pid: 49775, startedAt: "2026-09-30T10:00:01.000Z" },
+      ],
+    })).resolves.toEqual({ pidAlive: false, groupAlive: false });
   });
 
   it("keeps a live PID when its recorded timestamp differs by less than five seconds", async () => {

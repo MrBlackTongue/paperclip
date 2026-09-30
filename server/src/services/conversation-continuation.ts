@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { and, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, type Db } from "@paperclipai/db";
@@ -97,24 +99,52 @@ function processMayBeAlive(pid: number): boolean {
   }
 }
 
+const execFileAsync = promisify(execFile);
+
+async function processGroupMembers(groupId: number): Promise<Array<{ pid: number; startedAt: string }> | null> {
+  if (process.platform === "win32") return null;
+  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,pgid=,lstart="], { timeout: 1_500 });
+  const members: Array<{ pid: number; startedAt: string }> = [];
+  for (const line of stdout.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match || Number(match[2]) !== groupId) continue;
+    const startedAt = new Date(match[3]).toISOString();
+    members.push({ pid: Number(match[1]), startedAt });
+  }
+  return members.length ? members : null;
+}
+
 export async function persistedConversationProcessLiveness(
   run: { processPid: number | null; processGroupId: number | null; processStartedAt: Date | null },
-  probes: { isAlive: (pid: number) => boolean; startedAt: (pid: number) => Promise<string | null> } = {
+  probes: { isAlive: (pid: number) => boolean; startedAt: (pid: number) => Promise<string | null>;
+    groupMembers?: (groupId: number) => Promise<Array<{ pid: number; startedAt: string }> | null> } = {
     isAlive: processMayBeAlive,
     startedAt: readProcessStartedAt,
+    groupMembers: processGroupMembers,
   },
 ): Promise<{ pidAlive: boolean; groupAlive: boolean }> {
   let pidAlive = run.processPid !== null && probes.isAlive(run.processPid);
+  let pidReused = false;
   if (pidAlive && run.processStartedAt) {
     // A reused PID does not prove that its old process group has ended: a
     // descendant may still be running in it. Keep the independent group probe.
     const observed = await probes.startedAt(run.processPid!).catch(() => null);
     // ps reports whole seconds and a spawn callback may have supplied the
     // timestamp when the first start-time read failed.
-    if (observed !== null && Math.abs(new Date(observed).getTime() - run.processStartedAt.getTime()) >= 5_000)
+    if (observed !== null && Math.abs(new Date(observed).getTime() - run.processStartedAt.getTime()) >= 5_000) {
+      pidReused = true;
       pidAlive = false;
+    }
   }
-  const groupAlive = run.processGroupId !== null && probes.isAlive(-run.processGroupId);
+  let groupAlive = run.processGroupId !== null && probes.isAlive(-run.processGroupId);
+  if (groupAlive && pidReused && run.processGroupId === run.processPid && probes.groupMembers) {
+    // A new leader with no older members proves that this is a different group.
+    // Missing or unreadable membership keeps the historical hold.
+    const members = await probes.groupMembers(run.processGroupId!).catch(() => null);
+    const leader = members?.find((member) => member.pid === run.processGroupId);
+    if (leader && members!.every((member) => new Date(member.startedAt).getTime() >= new Date(leader.startedAt).getTime()))
+      groupAlive = false;
+  }
   return { pidAlive, groupAlive };
 }
 
