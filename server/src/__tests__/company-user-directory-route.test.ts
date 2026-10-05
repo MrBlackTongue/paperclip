@@ -4,11 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { accessRoutes } from "../routes/access.js";
 import { errorHandler } from "../middleware/index.js";
 
+const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn() }));
+
 vi.mock("../services/index.js", () => ({
   accessService: () => ({
     isInstanceAdmin: vi.fn(),
     canUser: vi.fn(),
-    hasPermission: vi.fn(),
+    hasPermission,
   }),
   agentService: () => ({
     getById: vi.fn(),
@@ -135,6 +137,7 @@ describe("GET /companies/:companyId/user-directory", () => {
   });
 
   it("lets a company agent read roles without allowing membership management", async () => {
+    hasPermission.mockImplementation(async (_companyId, _principalType, _principalId, permissionKey) => permissionKey !== "users:manage_permissions");
     const app = createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" });
     const res = await request(app).get("/api/companies/company-1/user-directory");
     expect(res.status).toBe(200);
@@ -144,6 +147,10 @@ describe("GET /companies/:companyId/user-directory", () => {
     ]);
     expect((await request(app).get("/api/companies/company-1/members")).status).toBe(403);
     expect((await request(app).patch("/api/companies/company-1/members/member-1").send({ membershipRole: "owner" })).status).toBe(403);
+    expect(hasPermission.mock.calls).toEqual([
+      ["company-1", "agent", "agent-1", "users:manage_permissions"],
+      ["company-1", "agent", "agent-1", "users:manage_permissions"],
+    ]);
   });
 
   it("rejects another company and unauthenticated callers", async () => {
