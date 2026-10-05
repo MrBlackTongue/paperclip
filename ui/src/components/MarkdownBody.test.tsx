@@ -63,7 +63,7 @@ afterEach(() => {
 
 function renderMarkdown(
   children: string,
-  seededIssues: Array<{ identifier: string; status: string; title?: string }> = [],
+  seededIssues: Array<{ identifier: string; status: string; title?: string; cacheKey?: string }> = [],
   props: Partial<ComponentProps<typeof MarkdownBody>> = {},
 ) {
   const queryClient = new QueryClient({
@@ -75,7 +75,7 @@ function renderMarkdown(
   });
 
   for (const issue of seededIssues) {
-    queryClient.setQueryData(queryKeys.issues.detail(issue.identifier), {
+    queryClient.setQueryData(queryKeys.issues.detail(issue.cacheKey ?? issue.identifier), {
       id: issue.identifier,
       identifier: issue.identifier,
       status: issue.status,
@@ -93,6 +93,17 @@ function renderMarkdown(
 }
 
 describe("MarkdownBody", () => {
+  it("preserves a saved document anchor in an explicit task link", () => {
+    // Hover/focus can resolve the issue to its plain identifier. Both the old
+    // fragment-bearing cache key and the corrected plain key model that load.
+    const html = renderMarkdown("[Saved document](/PAP/issues/PAP-1271#document-output)", [
+      { identifier: "PAP-1271", status: "done" },
+      { identifier: "PAP-1271", status: "done", cacheKey: "PAP-1271#document-output" },
+    ], { linkIssueReferences: true });
+    expect(html).toContain('href="/issues/PAP-1271#document-output"');
+    expect(html).not.toContain("PAP-1271%23document-output");
+  });
+
   it("renders markdown images without a resolver", () => {
     const html = renderToStaticMarkup(
       <QueryClientProvider client={new QueryClient()}>
@@ -118,6 +129,33 @@ describe("MarkdownBody", () => {
 
     expect(html).toContain('src="/resolved/images/org-chart.png"');
     expect(html).toContain('alt="Org chart"');
+  });
+
+  it("renders decision images as inert references without resolving or preloading them", () => {
+    const resolveImageSrc = vi.fn((src: string) => `https://resolver.invalid/${src}`);
+    const html = renderMarkdown(
+      '# Plan\n\n**Keep this step.**\n\n![Evidence](https://provider.invalid/track.png "Provider image")\n\n![Relative](images/proof.png)\n\n![Protocol relative](//provider.invalid/other.png)',
+      [], { mediaMode: "reference", resolveImageSrc },
+    );
+
+    expect(html).toContain("<h1>Plan</h1>");
+    expect(html).toContain("<strong>Keep this step.</strong>");
+    expect(html).toContain("Image: Evidence (https://provider.invalid/track.png)");
+    expect(html).toContain('title="Provider image"');
+    expect(html).toContain("Image: Relative (images/proof.png)");
+    expect(html).toContain("Image: Protocol relative (//provider.invalid/other.png)");
+    expect(html).not.toMatch(/<(?:img|link|iframe|video|audio)\b/);
+    expect(resolveImageSrc).not.toHaveBeenCalled();
+  });
+
+  it("keeps diagram source inert in decision media mode", () => {
+    const source = 'flowchart LR\n  A@{ img: "https://provider.invalid/diagram.png" }';
+    const html = renderMarkdown(`\`\`\`mermaid\n${source}\n\`\`\``, [], { mediaMode: "reference" });
+
+    expect(html).toContain('class="language-mermaid"');
+    expect(html).toContain("https://provider.invalid/diagram.png");
+    expect(html).not.toContain('class="paperclip-mermaid"');
+    expect(html).not.toContain("Rendering Mermaid diagram");
   });
 
   it("renders user, agent, project, skill, and routine mentions as chips", () => {

@@ -75,6 +75,19 @@ export interface ProjectManagedByPlugin {
   updatedAt: Date;
 }
 
+export interface ProjectDiscoverySummary {
+  id: string;
+  name: string;
+  status: string;
+  description: string | null;
+  descriptionTruncated: boolean;
+}
+
+export interface ProjectDiscoveryPage {
+  projects: ProjectDiscoverySummary[];
+  nextCursor: string | null;
+}
+
 export interface Project {
   id: string;
   companyId: string;
@@ -111,4 +124,21 @@ export interface Project {
   archivedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** GitHub identity is the provider's stable repository ID, never a credential. */
+export interface ProjectRepository {
+  id: string;
+  fullName: string;
+  url: string;
+  private?: boolean;
+  connections: string[];
+  connectionIds?: string[];
+}
+
+export interface ProjectRepositoryOptions {
+  connections?: Array<{ id: string; name: string }>;
+  repositories: ProjectRepository[];
+  connectionCount: number;
+  failedConnectionCount: number;
 }

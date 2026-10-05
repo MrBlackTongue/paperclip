@@ -23,6 +23,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { executionWorkspaceLifecycleService } from "../services/execution-workspace-lifecycle.js";
+import { executionWorkspaceService } from "../services/execution-workspaces.js";
 
 const execFileAsync = promisify(execFile);
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -42,7 +43,7 @@ async function pathExists(target: string) {
   return fs.stat(target).then(() => true).catch(() => false);
 }
 
-describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
+describeEmbeddedPostgres("shared execution workspace session lifecycle", () => {
   let db!: ReturnType<typeof createDb>;
   let lifecycle!: ReturnType<typeof executionWorkspaceLifecycleService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
@@ -206,8 +207,9 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     runId: null,
   };
 
-  it("defers cleanup until the terminal heartbeat finishes, then removes the worktree", async () => {
-    const fixture = await createFixture(["done"]);
+  it("defers the terminal archive while a heartbeat run is active, then archives the shared sessions", async () => {
+    const fixture = await createFixture(["done"], "shared_workspace");
+    const prior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
 
     const scheduled = await lifecycle.reconcileTerminalIssueWorkspace({
       issueId: fixture.issueIds[0],
@@ -215,41 +217,18 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
       actor,
     });
     expect(scheduled.outcome).toBe("deferred");
-    expect(await pathExists(fixture.worktreePath)).toBe(true);
+    expect(await statusOf(prior)).toBe("active");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
 
     const cleaned = await lifecycle.finishDeferredCleanup({
       issueId: fixture.issueIds[0],
       actor,
     });
     expect(cleaned.outcome).toBe("archived");
-    expect(await pathExists(fixture.worktreePath)).toBe(false);
-
-    const workspace = await db
-      .select()
-      .from(executionWorkspaces)
-      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId))
-      .then((rows) => rows[0]);
-    expect(workspace.status).toBe("archived");
-    expect(workspace.cleanupEligibleAt).toBeNull();
-  }, 20_000);
-
-  it("archives a shared session without deleting the project workspace", async () => {
-    const fixture = await createFixture(["done"], "shared_workspace");
-
-    const cleaned = await lifecycle.finishDeferredCleanup({
-      issueId: fixture.issueIds[0],
-      actor,
-    });
-
-    expect(cleaned.outcome).toBe("archived");
+    expect(cleaned.archivedWorkspaceIds.sort()).toEqual([prior, fixture.executionWorkspaceId].sort());
+    expect(await statusOf(prior)).toBe("archived");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("archived");
     expect(await pathExists(fixture.worktreePath)).toBe(true);
-
-    const workspace = await db
-      .select()
-      .from(executionWorkspaces)
-      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId))
-      .then((rows) => rows[0]);
-    expect(workspace.status).toBe("archived");
 
     const issue = await db
       .select({ executionWorkspaceId: issues.executionWorkspaceId })
@@ -259,50 +238,58 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
     expect(issue.executionWorkspaceId).toBeNull();
   }, 20_000);
 
-  it("waits until every issue linked to an inherited workspace is terminal", async () => {
-    const fixture = await createFixture(["done", "in_review"]);
+  it("does nothing while the issue is not terminal", async () => {
+    const fixture = await createFixture(["in_review"], "shared_workspace");
+    const prior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
 
-    const blocked = await lifecycle.finishDeferredCleanup({
+    const result = await lifecycle.finishDeferredCleanup({
       issueId: fixture.issueIds[0],
       actor,
     });
-    expect(blocked.outcome).toBe("blocked");
-    expect(await pathExists(fixture.worktreePath)).toBe(true);
 
-    await db.update(issues).set({ status: "done" }).where(eq(issues.id, fixture.issueIds[1]));
-    const cleaned = await lifecycle.finishDeferredCleanup({
-      issueId: fixture.issueIds[1],
-      actor,
-    });
-    expect(cleaned.outcome).toBe("archived");
-    expect(await pathExists(fixture.worktreePath)).toBe(false);
+    expect(result.outcome).toBe("not_applicable");
+    expect(await statusOf(prior)).toBe("active");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
   }, 20_000);
 
-  it("claims a terminal workspace once when linked issues finish concurrently", async () => {
-    const fixture = await createFixture(["done", "done"]);
+  it("keeps a shared session that another open issue still uses", async () => {
+    const fixture = await createFixture(["done", "in_review"], "shared_workspace");
 
-    const results = await Promise.all(
-      fixture.issueIds.map((issueId) => lifecycle.finishDeferredCleanup({ issueId, actor })),
-    );
+    const result = await lifecycle.finishDeferredCleanup({
+      issueId: fixture.issueIds[0],
+      actor,
+    });
 
-    expect(results.map((result) => result.outcome).sort()).toEqual([
-      "archived",
-      "not_applicable",
-    ]);
-    expect(await pathExists(fixture.worktreePath)).toBe(false);
+    expect(result.outcome).toBe("not_applicable");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
+  }, 20_000);
 
-    const workspace = await db
-      .select()
-      .from(executionWorkspaces)
-      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId))
-      .then((rows) => rows[0]);
-    expect(workspace.status).toBe("archived");
+  it("leaves isolated worktrees to the terminal workspace reaper", async () => {
+    const fixture = await createFixture(["done"]);
 
-    const cleanupActivities = await db
-      .select()
-      .from(activityLog)
-      .where(eq(activityLog.action, "execution_workspace.terminal_issue_cleanup"));
-    expect(cleanupActivities).toHaveLength(1);
+    const result = await lifecycle.finishDeferredCleanup({
+      issueId: fixture.issueIds[0],
+      actor,
+    });
+
+    expect(result.outcome).toBe("not_applicable");
+    expect(await statusOf(fixture.executionWorkspaceId)).toBe("active");
+    expect(await pathExists(fixture.worktreePath)).toBe(true);
+  }, 20_000);
+
+  it("lets the terminal workspace reaper archive a shared session without git or merge checks", async () => {
+    const fixture = await createFixture(["done"], "shared_workspace");
+    const prior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
+    // A dirty project workspace must not block the archive of a shared session record.
+    await fs.writeFile(path.join(fixture.worktreePath, "untracked.txt"), "keep me\n", "utf8");
+    const reaper = executionWorkspaceService(db, { workspaceReaperCooldownDays: 0 });
+
+    const result = await reaper.sweepTerminalWorkspaces();
+
+    expect(result.cleanupFailed).toBe(0);
+    expect(await statusOf(prior)).toBe("archived");
+    expect(await pathExists(fixture.worktreePath)).toBe(true);
+    expect(await pathExists(path.join(fixture.worktreePath, "untracked.txt"))).toBe(true);
   }, 20_000);
 
   it("archives shared sessions of previous runs and keeps the current one", async () => {
@@ -394,40 +381,5 @@ describeEmbeddedPostgres("execution workspace terminal issue cleanup", () => {
 
     expect(afterFinish).toEqual([liveWorkspace]);
     expect(await statusOf(liveWorkspace)).toBe("archived");
-  }, 20_000);
-
-  it("archives shared sessions of previous runs when the issue reaches a terminal status", async () => {
-    const fixture = await createFixture(["done"], "shared_workspace");
-    const prior = await insertPriorSharedSession(fixture, fixture.issueIds[0]);
-
-    const cleaned = await lifecycle.finishDeferredCleanup({
-      issueId: fixture.issueIds[0],
-      actor,
-    });
-
-    expect(cleaned.outcome).toBe("archived");
-    expect(await statusOf(prior)).toBe("archived");
-    expect(await statusOf(fixture.executionWorkspaceId)).toBe("archived");
-    expect(await pathExists(fixture.worktreePath)).toBe(true);
-  }, 20_000);
-
-  it("keeps a dirty terminal workspace and records why automatic cleanup was skipped", async () => {
-    const fixture = await createFixture(["done"]);
-    await fs.writeFile(path.join(fixture.worktreePath, "untracked.txt"), "keep me\n", "utf8");
-
-    const blocked = await lifecycle.finishDeferredCleanup({
-      issueId: fixture.issueIds[0],
-      actor,
-    });
-    expect(blocked.outcome).toBe("blocked");
-    expect(await pathExists(fixture.worktreePath)).toBe(true);
-
-    const workspace = await db
-      .select()
-      .from(executionWorkspaces)
-      .where(eq(executionWorkspaces.id, fixture.executionWorkspaceId))
-      .then((rows) => rows[0]);
-    expect(workspace.status).toBe("active");
-    expect(workspace.cleanupReason).toContain("uncommitted files");
   }, 20_000);
 });

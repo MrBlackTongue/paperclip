@@ -25,12 +25,19 @@ import type {
   IssueAssigneeAdapterOverrides,
   IssueAttachment,
   IssueThreadInteraction,
+  ConnectionIntentInteraction,
+  ConnectionIntentPayload,
+  ConnectionIntentResult,
+  ConnectionIntentSetupOptions,
+  ConnectionRequestResult,
+  ConnectionsSearchResult,
   Approval,
   SuggestTasksInteraction,
   AskUserQuestionsInteraction,
   RequestConfirmationInteraction,
   RequestCheckboxConfirmationInteraction,
   CreateIssueThreadInteraction,
+  CreateIssueThreadInteractionInput,
   PluginIssueOriginKind,
   IssueSurfaceVisibility,
   PluginManagedAgentResolution,
@@ -126,11 +133,18 @@ export type {
   IssueDocumentSummary,
   IssueRelationIssueSummary,
   IssueThreadInteraction,
+  ConnectionIntentInteraction,
+  ConnectionIntentPayload,
+  ConnectionIntentResult,
+  ConnectionIntentSetupOptions,
+  ConnectionRequestResult,
+  ConnectionsSearchResult,
   SuggestTasksInteraction,
   AskUserQuestionsInteraction,
   RequestConfirmationInteraction,
   RequestCheckboxConfirmationInteraction,
   CreateIssueThreadInteraction,
+  CreateIssueThreadInteractionInput,
   PluginIssueOriginKind,
   IssueSurfaceVisibility,
   Agent,
@@ -1532,7 +1546,7 @@ export interface PluginIssuesClient {
   ): Promise<IssueComment>;
   createInteraction(
     issueId: string,
-    interaction: CreateIssueThreadInteraction,
+    interaction: CreateIssueThreadInteractionInput,
     companyId: string,
     options?: { authorAgentId?: string },
   ): Promise<IssueThreadInteraction>;
@@ -1544,7 +1558,7 @@ export interface PluginIssuesClient {
   ): Promise<SuggestTasksInteraction>;
   askUserQuestions(
     issueId: string,
-    interaction: Omit<Extract<CreateIssueThreadInteraction, { kind: "ask_user_questions" }>, "kind">,
+    interaction: Omit<Extract<CreateIssueThreadInteractionInput, { kind: "ask_user_questions" }>, "kind">,
     companyId: string,
     options?: { authorAgentId?: string },
   ): Promise<AskUserQuestionsInteraction>;
@@ -2008,6 +2022,77 @@ export interface PluginExecutionClient {
   log(stream: "stdout" | "stderr", chunk: string): void;
 }
 
+/**
+ * `ctx.loginPty` — stream one live login pseudo-terminal's output and exit
+ * from a sandbox provider worker to the host.
+ *
+ * The worker opener registers the output listener on the session and forwards
+ * each raw chunk through `output(hostRouteId, workerSessionId, chunk)`. It
+ * forwards the child exit through `exit(hostRouteId, workerSessionId,
+ * exitCode)`. Each call carries the host route identifier the open request
+ * carried and the worker session identifier the open reply returned, so the
+ * host can hold more than one concurrent login pseudo-terminal per worker and
+ * bind each chunk to its own route. The host drops a chunk or an exit that
+ * carries an unknown, a stale, or a mismatched identifier, and it never logs
+ * the raw bytes. The default is a no-op that never throws.
+ */
+export interface PluginLoginPtyClient {
+  /**
+   * Deliver one raw output chunk of a live login pseudo-terminal.
+   *
+   * @param hostRouteId - The host route identifier the open request carried. The worker echoes it, so the host routes the chunk to its own route.
+   * @param workerSessionId - The worker session identifier the open reply returned.
+   * @param chunk - The raw terminal output text.
+   */
+  output(hostRouteId: string, workerSessionId: string, chunk: string): void;
+  /**
+   * Deliver the child exit of a live login pseudo-terminal.
+   *
+   * @param hostRouteId - The host route identifier the open request carried. The worker echoes it, so the host resolves the exit against its own route.
+   * @param workerSessionId - The worker session identifier the open reply returned.
+   * @param exitCode - The child exit code, or null when the child ended with no code.
+   */
+  exit(hostRouteId: string, workerSessionId: string, exitCode: number | null): void;
+}
+
+/**
+ * `ctx.duplexChannel` — stream one persistent duplex channel's data and exit from
+ * a sandbox provider worker to the host.
+ *
+ * The worker registers the data listener on the channel and forwards each raw
+ * chunk through `data(workerSessionId, chunk)`. It forwards the child exit through
+ * `exit(workerSessionId, exitCode)`. Each call carries the worker session
+ * identifier the open reply returned, so the host binds the data to the open route
+ * by that identifier while the route is open. The host drops a chunk or an exit
+ * that carries an unknown or a mismatched identifier, and it never logs the raw
+ * bytes. The default is a no-op that never throws. This client models the
+ * `loginPty` client, but it carries no login command allowlist.
+ */
+export interface PluginDuplexChannelClient {
+  /**
+   * Deliver one raw data chunk of a persistent duplex channel.
+   *
+   * @param hostRouteId - The host route identifier the open request carried. The worker echoes it, so the host routes the exact pair.
+   * @param workerSessionId - The worker session identifier the open reply returned.
+   * @param chunk - The raw channel output bytes.
+   */
+  data(hostRouteId: string, workerSessionId: string, chunk: Uint8Array): void;
+  /**
+   * Deliver the child exit of a persistent duplex channel.
+   *
+   * @param hostRouteId - The host route identifier the open request carried. The worker echoes it, so the host routes the exact pair.
+   * @param workerSessionId - The worker session identifier the open reply returned.
+   * @param exitCode - The child exit code, or null when the child ended with no code.
+   * @param transportClosed - True when the transport closed with no exit data, so the exit is a reason-less transport close, not a process exit. Absent marks a real process exit.
+   */
+  exit(
+    hostRouteId: string,
+    workerSessionId: string,
+    exitCode: number | null,
+    transportClosed?: boolean,
+  ): void;
+}
+
 // ---------------------------------------------------------------------------
 // Full plugin context
 // ---------------------------------------------------------------------------
@@ -2122,6 +2207,15 @@ export interface PluginContext {
    * host runner log sink. The default is a no-op for a provider that does not
    * stream. */
   execution: PluginExecutionClient;
+
+  /** Stream one live login pseudo-terminal's output and exit to the host.
+   * The default is a no-op for a provider that opens no login
+   * pseudo-terminal. */
+  loginPty: PluginLoginPtyClient;
+
+  /** Stream one persistent duplex channel's data and exit to the host. The
+   * default is a no-op for a provider that opens no duplex channel. */
+  duplexChannel: PluginDuplexChannelClient;
 
   /** Register agent tool handlers. Requires `agent.tools.register`. */
   tools: PluginToolsClient;
