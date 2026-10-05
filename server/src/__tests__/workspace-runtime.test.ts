@@ -25,6 +25,11 @@ import {
 } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import {
+  buildExecutionWorkspaceAdapterConfig,
+  parseIssueExecutionWorkspaceSettings,
+  parseProjectExecutionWorkspacePolicy,
+} from "../services/execution-workspace-policy.ts";
+import {
   buildWorkspaceRuntimeDesiredStatePatch,
   cleanupExecutionWorkspaceArtifacts,
   ensurePersistedExecutionWorkspaceAvailable,
@@ -38,6 +43,8 @@ import {
   releaseRuntimeServicesForRun,
   UnresolvedWorkspaceBaseRefError,
   resetRuntimeServicesForTests,
+  MANAGED_RUNTIME_PUBLIC_URL_ENV,
+  resolveManagedPaperclipRuntimePublicOrigin,
   resolveRuntimeProvisionCommand,
   resolveWorkspaceRuntimeReadinessTimeoutSec,
   resolveShell,
@@ -456,6 +463,8 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
       DATABASE_URL: "postgres://example.test/paperclip",
       PAPERCLIP_HOME: "/tmp/paperclip-home",
       PAPERCLIP_INSTANCE_ID: "runtime-instance",
+      BETTER_AUTH_URL: "https://parent.example.test",
+      BETTER_AUTH_BASE_URL: "https://legacy-parent.example.test",
       npm_config_tailscale_auth: "true",
       npm_config_authenticated_private: "true",
       HOST: "0.0.0.0",
@@ -463,10 +472,76 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
 
     expect(sanitized.PAPERCLIP_HOME).toBeUndefined();
     expect(sanitized.PAPERCLIP_INSTANCE_ID).toBeUndefined();
+    expect(sanitized.BETTER_AUTH_URL).toBeUndefined();
+    expect(sanitized.BETTER_AUTH_BASE_URL).toBeUndefined();
     expect(sanitized.DATABASE_URL).toBeUndefined();
     expect(sanitized.npm_config_tailscale_auth).toBeUndefined();
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
     expect(sanitized.HOST).toBe("0.0.0.0");
+  });
+});
+
+describe("resolveManagedPaperclipRuntimePublicOrigin", () => {
+  const baseInput = {
+    serviceName: "paperclip-dev",
+    command: "pnpm dev --bind lan",
+  };
+
+  it("leaves explicit operator origin configuration unchanged", () => {
+    expect(resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: { PAPERCLIP_PUBLIC_URL: "https://operator.example.com" },
+      exposedUrl: "https://managed-worktree.example.com",
+    })).toBeNull();
+
+    expect(resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: { BETTER_AUTH_URL: "https://auth.example.com" },
+      exposedUrl: "https://managed-worktree.example.com",
+    })).toBeNull();
+  });
+
+  it("infers browser-reachable HTTPS and loopback origins", () => {
+    expect(resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: {},
+      exposedUrl: "https://paperclip-dev.tail29c1aa.ts.net/path?ignored=true",
+      exposedUrlTemplate: "https://{{workspace.branchName}}.tail29c1aa.ts.net",
+    })).toBe("https://paperclip-dev.tail29c1aa.ts.net");
+    expect(resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: {},
+      exposedUrl: "http://127.0.0.1:45439",
+    })).toBe("http://127.0.0.1:45439");
+  });
+
+  it("rejects internal-only and unsafe inferred origins with actionable guidance", () => {
+    expect(() => resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: {},
+      exposedUrl: "http://paperclip-dev:45439",
+    })).toThrow(/internal-only.*Configure PAPERCLIP_PUBLIC_URL or BETTER_AUTH_URL/);
+    expect(() => resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: {},
+      exposedUrl: "http://10.0.0.8:45439",
+    })).toThrow(/non-loopback OAuth callbacks require HTTPS/);
+  });
+
+  it("keeps interpolated hostnames inside the operator-configured domain", () => {
+    expect(() => resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: {},
+      exposedUrl: "https://evil.com/workaround.tail29c1aa.ts.net",
+      exposedUrlTemplate: "https://{{workspace.branchName}}.tail29c1aa.ts.net",
+    })).toThrow(/outside the hostname boundary configured by expose\.urlTemplate/);
+
+    expect(() => resolveManagedPaperclipRuntimePublicOrigin({
+      ...baseInput,
+      environment: {},
+      exposedUrl: "https://managed-worktree.paperclip.dev",
+      exposedUrlTemplate: "https://{{workspace.branchName}}.com",
+    })).toThrow(/does not define a stable hostname boundary/);
   });
 });
 
@@ -797,6 +872,89 @@ describe("realizeExecutionWorkspace", () => {
     expect(second.branchCreatedByRuntime).toBe(true);
     expect(second.cwd).toBe(first.cwd);
     expect(second.branchName).toBe(first.branchName);
+  });
+
+  it("retains the project provision command when an issue overrides its base branch", async () => {
+    const repoRoot = await createTempRepo();
+    await fs.mkdir(path.join(repoRoot, "scripts"));
+    await fs.writeFile(
+      path.join(repoRoot, "scripts", "provision-worktree.sh"),
+      "#!/usr/bin/env bash\necho 'Unexpected repository provision fallback' >&2\nexit 1\n",
+    );
+    await runGit(repoRoot, ["add", "scripts/provision-worktree.sh"]);
+    await runGit(repoRoot, ["commit", "-m", "Add fallback provisioner"]);
+    await runGit(repoRoot, ["branch", "release"]);
+    const config = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {},
+      projectPolicy: parseProjectExecutionWorkspacePolicy({
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree", baseRef: "main", provisionCommand: "true" },
+      }),
+      issueSettings: parseIssueExecutionWorkspaceSettings({
+        mode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree", baseRef: "release" },
+      }),
+      mode: "isolated_workspace",
+      legacyUseProjectWorkspace: null,
+    });
+    try {
+      const workspace = await realizeExecutionWorkspace({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
+        },
+        config,
+        issue: { id: "issue-1", identifier: "TEST-1", title: "Keep project setup" },
+        agent: { id: "agent-1", name: "Test agent", companyId: "company-1" },
+      });
+      expect(workspace.created).toBe(true);
+      expect(workspace.baseRefSha).toBe(await readGit(repoRoot, ["rev-parse", "release"]));
+      await expect(fs.stat(path.join(workspace.cwd, ".git"))).resolves.toBeTruthy();
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])("realizes a plain Paperclip checkout without a local seed instance (image default env: %s)", async (defaultConfigInEnv) => {
+    const repoRoot = await createTempRepo();
+    const paperclipHome = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-env-only-home-")));
+    const previousEnv = {
+      PAPERCLIP_HOME: process.env.PAPERCLIP_HOME,
+      PAPERCLIP_CONFIG: process.env.PAPERCLIP_CONFIG,
+      PAPERCLIP_INSTANCE_ID: process.env.PAPERCLIP_INSTANCE_ID,
+    };
+    try {
+      await fs.mkdir(path.join(repoRoot, "scripts"));
+      await fs.copyFile(provisionWorktreeScriptPath, path.join(repoRoot, "scripts", "provision-worktree.sh"));
+      await runGit(repoRoot, ["add", "scripts/provision-worktree.sh"]);
+      await runGit(repoRoot, ["commit", "-m", "Add Paperclip worktree provisioner"]);
+      process.env.PAPERCLIP_HOME = paperclipHome;
+      process.env.PAPERCLIP_INSTANCE_ID = "default";
+      if (defaultConfigInEnv) process.env.PAPERCLIP_CONFIG = path.join(paperclipHome, "instances", "default", "config.json");
+      else delete process.env.PAPERCLIP_CONFIG;
+
+      const workspace = await realizeWorktreeForTest(repoRoot, "HEAD");
+
+      expect(workspace.strategy).toBe("git_worktree");
+      expect(workspace.created).toBe(true);
+      expect(await readGit(workspace.cwd, ["branch", "--show-current"])).toBe(workspace.branchName);
+      for (const file of ["config.json", ".env", "seed-manifest.json", "seed-pending", "seed-complete"]) {
+        expect(existsSync(path.join(workspace.cwd, ".paperclip", file))).toBe(false);
+      }
+      expect(await fs.readdir(paperclipHome)).toEqual([]);
+    } finally {
+      for (const [key, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await fs.rm(repoRoot, { recursive: true, force: true });
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+    }
   });
 
   it("defaults the repo-provided worktree provisioner for git worktree strategies", async () => {
@@ -4274,6 +4432,32 @@ describe("ensureRuntimeServicesForRun", () => {
     }
   });
 
+  it("preserves the selected persisted runtime id when starting one configured service", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-selected-id-"));
+    const workspace = buildWorkspace(workspaceRoot);
+    const restorePaperclipEnv = configureRuntimeProvisionTestHome(workspaceRoot, "runtime-selected-id");
+    const runtimeServiceId = randomUUID();
+    const config = runtimeProvisionTestConfig({});
+
+    try {
+      const services = await startRuntimeServicesForWorkspaceControl({
+        ...runtimeProvisionStartInput({ workspace, config }),
+        runtimeServiceId,
+        serviceIndex: 0,
+      });
+
+      expect(services).toHaveLength(1);
+      expect(services[0]?.id).toBe(runtimeServiceId);
+    } finally {
+      await stopRuntimeServicesForExecutionWorkspace({
+        executionWorkspaceId: "execution-workspace-1",
+        workspaceCwd: workspaceRoot,
+      });
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+      restorePaperclipEnv();
+    }
+  });
+
   it("leaves manual runtime services untouched during agent runs", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-manual-"));
     const workspace = buildWorkspace(workspaceRoot);
@@ -4304,6 +4488,146 @@ describe("ensureRuntimeServicesForRun", () => {
 
     expect(services).toEqual([]);
   });
+
+  it("enables UI dev middleware by default for managed Paperclip worktree runtimes", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-ui-dev-"));
+    const workspace = buildWorkspace(workspaceRoot);
+    const serviceScript =
+      "const http=require('node:http');"
+      + "http.createServer((req,res)=>{"
+      + "if(req.url==='/api/health'){res.setHeader('content-type','application/json');"
+      + "res.end(JSON.stringify({status:'ok'}));return;}"
+      + "res.end(process.env.PAPERCLIP_UI_DEV_MIDDLEWARE||'missing');"
+      + "}).listen(Number(process.env.PORT),'127.0.0.1');";
+
+    try {
+      const [runtime] = await startRuntimeServicesForWorkspaceControl({
+        actor: { id: "agent-1", name: "Codex Coder", companyId: "company-1" },
+        issue: null,
+        workspace,
+        executionWorkspaceId: "execution-workspace-ui-dev",
+        config: {
+          workspaceRuntime: {
+            services: [{
+              name: "paperclip-dev",
+              command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(serviceScript)}`,
+              port: { type: "auto" },
+              readiness: {
+                type: "http",
+                urlTemplate: "http://127.0.0.1:{{port}}",
+                timeoutSec: 10,
+                intervalMs: 100,
+              },
+              expose: {
+                type: "url",
+                urlTemplate: "http://127.0.0.1:{{port}}",
+              },
+              lifecycle: "shared",
+              reuseScope: "execution_workspace",
+              stopPolicy: { type: "manual" },
+            }],
+          },
+        },
+        adapterEnv: {},
+      });
+
+      await expect(fetch(`${runtime!.url}/ui-mode`).then((response) => response.text()))
+        .resolves.toBe("true");
+    } finally {
+      await stopRuntimeServicesForExecutionWorkspace({
+        executionWorkspaceId: "execution-workspace-ui-dev",
+        workspaceCwd: workspaceRoot,
+      });
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("injects isolated browser callback origins into separate worktree runtimes", async () => {
+    const firstRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-origin-first-"));
+    const secondRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-origin-second-"));
+    const firstWorkspace: RealizedExecutionWorkspace = {
+      ...buildWorkspace(firstRoot),
+      source: "task_session",
+      strategy: "git_worktree",
+      branchName: "pap-17121-first",
+      worktreePath: firstRoot,
+    };
+    const secondWorkspace: RealizedExecutionWorkspace = {
+      ...buildWorkspace(secondRoot),
+      source: "task_session",
+      strategy: "git_worktree",
+      branchName: "pap-17121-second",
+      worktreePath: secondRoot,
+    };
+    const serviceScript =
+      "const http=require('node:http');"
+      + "http.createServer((req,res)=>{"
+      + "if(req.url==='/api/health'){res.setHeader('content-type','application/json');"
+      + "res.end(JSON.stringify({status:'ok'}));return;}"
+      + `res.end(process.env.${MANAGED_RUNTIME_PUBLIC_URL_ENV}||'missing');`
+      + "}).listen(Number(process.env.PORT),'127.0.0.1');";
+    const config = {
+      workspaceRuntime: {
+        services: [
+          {
+            name: "paperclip-dev",
+            command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(serviceScript)}`,
+            port: { type: "auto" },
+            readiness: {
+              type: "http",
+              urlTemplate: "http://127.0.0.1:{{port}}",
+              timeoutSec: 10,
+              intervalMs: 100,
+            },
+            expose: {
+              type: "url",
+              urlTemplate: "https://{{workspace.branchName}}.tail29c1aa.ts.net",
+            },
+            lifecycle: "shared",
+            reuseScope: "execution_workspace",
+            stopPolicy: { type: "manual" },
+          },
+        ],
+      },
+    };
+    const actor = { id: "agent-1", name: "Codex Coder", companyId: "company-1" };
+
+    try {
+      const [first] = await startRuntimeServicesForWorkspaceControl({
+        actor,
+        issue: null,
+        workspace: firstWorkspace,
+        executionWorkspaceId: "execution-workspace-first",
+        config,
+        adapterEnv: {},
+      });
+      const [second] = await startRuntimeServicesForWorkspaceControl({
+        actor,
+        issue: null,
+        workspace: secondWorkspace,
+        executionWorkspaceId: "execution-workspace-second",
+        config,
+        adapterEnv: {},
+      });
+
+      expect(first?.id).not.toBe(second?.id);
+      await expect(fetch(`http://127.0.0.1:${first!.port}/origin`).then((response) => response.text()))
+        .resolves.toBe("https://pap-17121-first.tail29c1aa.ts.net");
+      await expect(fetch(`http://127.0.0.1:${second!.port}/origin`).then((response) => response.text()))
+        .resolves.toBe("https://pap-17121-second.tail29c1aa.ts.net");
+    } finally {
+      await stopRuntimeServicesForExecutionWorkspace({
+        executionWorkspaceId: "execution-workspace-first",
+        workspaceCwd: firstRoot,
+      });
+      await stopRuntimeServicesForExecutionWorkspace({
+        executionWorkspaceId: "execution-workspace-second",
+        workspaceCwd: secondRoot,
+      });
+      await fs.rm(firstRoot, { recursive: true, force: true });
+      await fs.rm(secondRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("requires Paperclip dev runtime services to pass /api/health readiness", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-health-"));
@@ -4376,7 +4700,9 @@ describe("ensureRuntimeServicesForRun", () => {
         command: serviceCommand,
         cwd: ".",
         port: { type: "auto" as const },
-        readiness: { type: "http" as const, urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 3, intervalMs: 100 },
+        // This checks replacement, not startup latency. Allow the same startup
+        // budget as other real-process fixtures on busy CI hosts.
+        readiness: { type: "http" as const, urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 10, intervalMs: 100 },
         expose: { type: "url" as const, urlTemplate: "http://127.0.0.1:{{port}}" },
         lifecycle: "shared" as const,
         stopPolicy: { type: "manual" as const },
@@ -4402,7 +4728,7 @@ describe("ensureRuntimeServicesForRun", () => {
       });
       await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("reuses a shared Paperclip dev runtime after one transient unhealthy response", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-transient-health-"));
@@ -4419,7 +4745,9 @@ describe("ensureRuntimeServicesForRun", () => {
         command: serviceCommand,
         cwd: ".",
         port: { type: "auto" as const },
-        readiness: { type: "http" as const, urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 3, intervalMs: 100 },
+        // This checks reuse after a transient failure, not startup latency. Allow the same startup
+        // budget as other real-process fixtures on busy CI hosts.
+        readiness: { type: "http" as const, urlTemplate: "http://127.0.0.1:{{port}}", timeoutSec: 10, intervalMs: 100 },
         expose: { type: "url" as const, urlTemplate: "http://127.0.0.1:{{port}}" },
         lifecycle: "shared" as const,
         stopPolicy: { type: "manual" as const },
@@ -4439,9 +4767,9 @@ describe("ensureRuntimeServicesForRun", () => {
       });
       await fs.rm(workspaceRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
-  it("uses explicit readiness URL when exposed URL is not the local probe address", async () => {
+  it("rejects an unreachable exposed origin even when readiness uses a local probe", async () => {
     const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-explicit-readiness-"));
     const workspace = buildWorkspace(workspaceRoot);
     const runId = "run-paperclip-explicit-readiness";
@@ -4449,7 +4777,7 @@ describe("ensureRuntimeServicesForRun", () => {
       "node -e \"const http=require('node:http'); http.createServer((req,res)=>{ if (req.url==='/api/health') { res.end('ok'); return; } res.statusCode=404; res.end('not found'); }).listen(Number(process.env.PORT), '127.0.0.1')\"";
 
     try {
-      const services = await ensureRuntimeServicesForRun({
+      await expect(ensureRuntimeServicesForRun({
         runId,
         agent: {
           id: "agent-1",
@@ -4485,10 +4813,7 @@ describe("ensureRuntimeServicesForRun", () => {
           },
         },
         adapterEnv: {},
-      });
-
-      expect(services).toHaveLength(1);
-      expect(services[0]?.url).toMatch(/^http:\/\/not-a-real-paperclip-host\.invalid:\d+$/);
+      })).rejects.toThrow(/internal-only or non-resolvable.*Configure PAPERCLIP_PUBLIC_URL or BETTER_AUTH_URL/);
     } finally {
       await releaseRuntimeServicesForRun(runId);
     }
@@ -6418,35 +6743,44 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         executionWorkspaceId,
         serviceName: "web",
         status: "provisioning",
+        healthStatus: "unknown",
         providerRef: null,
       });
       expect(existsSync(markerPath)).toBe(false);
 
       await waitForMarker(markerPath);
-      const startingRow = await waitForPersistedStatus("starting");
-      expect(startingRow).toMatchObject({
+      // Readiness begins before the PID-bearing transaction commits. Keep the
+      // listener independent of DB reads and verify the completed records.
+      const services = await startPromise;
+      expect(services).toHaveLength(1);
+      expect(services[0]).toMatchObject({
+        id: provisioningRow.id,
         companyId,
         projectId,
         projectWorkspaceId,
         executionWorkspaceId,
         issueId,
         serviceName: "web",
-        status: "starting",
-        healthStatus: "unknown",
-      });
-      expect(startingRow.providerRef).toMatch(/^\d+$/);
-      expect(startingRow.port).toEqual(expect.any(Number));
-
-      const services = await startPromise;
-      expect(services).toHaveLength(1);
-      expect(services[0]).toMatchObject({
-        id: startingRow.id,
         status: "running",
         healthStatus: "healthy",
       });
+      expect(services[0]!.providerRef).toMatch(/^\d+$/);
+      expect(services[0]!.port).toEqual(expect.any(Number));
 
       const runningRow = await waitForPersistedStatus("running");
-      expect(runningRow.id).toBe(startingRow.id);
+      expect(runningRow).toMatchObject({
+        id: provisioningRow.id,
+        companyId,
+        projectId,
+        projectWorkspaceId,
+        executionWorkspaceId,
+        issueId,
+        serviceName: "web",
+        status: "running",
+        healthStatus: "healthy",
+        providerRef: services[0]!.providerRef,
+        port: services[0]!.port,
+      });
       await expect(fetch(services[0]!.url!)).resolves.toMatchObject({ ok: true });
       const runtimeProvisionOperations = await db
         .select()
@@ -6626,6 +6960,7 @@ describeEmbeddedPostgres("workspace runtime service control persistence", () => 
         services: [{
           name: "paperclip-dev",
           command,
+          env: { PAPERCLIP_PUBLIC_URL: "http://127.0.0.1:3100" },
           port: { type: "fixed", value: 45_439, envKey: "PORT" },
           readiness: {
             type: "http",
@@ -7503,7 +7838,13 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     const reservePort = async () => {
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const probe = net.createServer();
-        await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+        // macOS can allocate an entire ephemeral range above 55535. Pick a
+        // bounded candidate so the test's HMR companion remains a valid port.
+        await new Promise<void>((resolve) => {
+          probe.once("error", () => resolve());
+          probe.listen(20_000 + Math.floor(Math.random() * 20_000), "127.0.0.1", resolve);
+        });
+        if (!probe.listening) continue;
         const address = probe.address();
         const port = typeof address === "object" && address ? address.port : null;
         await new Promise<void>((resolve, reject) => {
@@ -7537,6 +7878,7 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
         {
           name: "paperclip-dev",
           command,
+          env: { PAPERCLIP_PUBLIC_URL: "http://127.0.0.1:3100" },
           port: legacyPort,
           // The pre-feature block: backend URL only, no exposure declaration.
           expose: { type: "url", urlTemplate: "http://127.0.0.1:{{port}}" },
@@ -7843,7 +8185,13 @@ describeEmbeddedPostgres("workspace runtime startup reconciliation", () => {
     const reservePort = async () => {
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const probe = net.createServer();
-        await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+        // macOS can allocate an entire ephemeral range above 55535. Pick a
+        // bounded candidate so the test's HMR companion remains a valid port.
+        await new Promise<void>((resolve) => {
+          probe.once("error", () => resolve());
+          probe.listen(20_000 + Math.floor(Math.random() * 20_000), "127.0.0.1", resolve);
+        });
+        if (!probe.listening) continue;
         const address = probe.address();
         const candidate = typeof address === "object" && address ? address.port : null;
         await new Promise<void>((resolve, reject) => {

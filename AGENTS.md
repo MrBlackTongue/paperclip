@@ -20,6 +20,12 @@ Before making changes, read in this order:
 `doc/SPEC.md` is long-horizon product context.
 `doc/SPEC-implementation.md` is the concrete V1 build contract.
 
+When adding or changing an Apps catalog connection, also follow
+`doc/connections/CONNECTOR-PLAYBOOK.md`. It is the canonical connection
+authoring runbook for provider research, supported transport/auth patterns,
+credential handling, branding, implementation, testing, live proof, and PR
+submission.
+
 ## 3. Repo Map
 
 - `server/`: Express REST API and orchestration services
@@ -67,6 +73,11 @@ pnpm dev
 
 1. Keep changes company-scoped.
 Every domain entity should be scoped to a company and company boundaries must be enforced in routes/services.
+
+Explicit exception: announcement dismissals are instance-wide user preferences,
+keyed by user and announcement so they persist across companies. Their audit
+context must still validate company membership. The announcement publication-ID
+registry is instance-level feed metadata; it contains no company or user data.
 
 2. Keep contracts synchronized.
 If you change schema/API behavior, update all impacted layers:
@@ -187,6 +198,7 @@ When adding endpoints:
 - Keep routes and nav aligned with available API surface
 - Use company selection context for company-scoped pages
 - Surface failures clearly; do not silently ignore API errors
+- Form and wizard footers: keep Save & exit (or Cancel/Back) left and the primary action right in the same vertically aligned row. Each step owns the entire footer; never append Save & exit as a separate row. See `DESIGN.md`.
 
 ## 10. Pull Request Requirements
 
