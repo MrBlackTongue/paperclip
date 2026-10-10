@@ -46,6 +46,17 @@ describe("persisted conversation process ownership", () => {
     })).resolves.toEqual({ pidAlive: false, groupAlive: false });
   });
 
+  it("keeps a reused group whose other member started in the same second as the new leader", async () => {
+    await expect(persistedConversationProcessLiveness(stored, {
+      isAlive: () => true,
+      startedAt: async () => "2026-09-30T10:00:00.000Z",
+      groupMembers: async () => [
+        { pid: 49773, startedAt: "2026-09-30T10:00:00.000Z" },
+        { pid: 49776, startedAt: "2026-09-30T10:00:00.000Z" },
+      ],
+    })).resolves.toEqual({ pidAlive: false, groupAlive: true });
+  });
+
   it("keeps a live PID when its recorded timestamp differs by less than five seconds", async () => {
     await expect(persistedConversationProcessLiveness(stored, {
       isAlive: () => true,

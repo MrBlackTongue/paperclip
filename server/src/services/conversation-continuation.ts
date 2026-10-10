@@ -142,11 +142,15 @@ export async function persistedConversationProcessLiveness(
   }
   let groupAlive = run.processGroupId !== null && probes.isAlive(-run.processGroupId);
   if (groupAlive && pidReused && run.processGroupId === run.processPid && probes.groupMembers) {
-    // A new leader with no older members proves that this is a different group.
-    // Missing or unreadable membership keeps the historical hold.
+    // A new leader whose other members all started later proves that this is a
+    // different group. ps reports whole seconds, so a member from the same
+    // second may predate the leader. Missing or unreadable membership keeps the
+    // historical hold.
     const members = await probes.groupMembers(run.processGroupId!).catch(() => null);
     const leader = members?.find((member) => member.pid === run.processGroupId);
-    if (leader && members!.every((member) => new Date(member.startedAt).getTime() >= new Date(leader.startedAt).getTime()))
+    const leaderStartedAt = leader ? new Date(leader.startedAt).getTime() : NaN;
+    if (leader && members!.every((member) =>
+      member.pid === leader.pid || new Date(member.startedAt).getTime() > leaderStartedAt))
       groupAlive = false;
   }
   return { pidAlive, groupAlive };
