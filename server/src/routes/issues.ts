@@ -18099,30 +18099,6 @@ export function issueRoutes(
     res.json(bundle);
   });
 
-  router.post("/issues/:id/comments", validate(addIssueCommentSchema), async (req, res) => {
-    const id = req.params.id as string;
-    const issue = await getCommentableIssue(req, res, id);
-    if (!issue) return;
-    if (req.actor.type === "agent" && req.body.onBehalfOfUserId != null) {
-      await auditAgentIssueCommentAttributionSpoof({
-        db,
-        req,
-        issue,
-        surface: "issue.comment.create",
-        requestedValue: readNonEmptyString(req.body.onBehalfOfUserId),
-      });
-      await denyIssueWrite(req, res, issue, "issue_write_attribution_spoof_rejected");
-      return;
-    }
-    const commentAccessDecision = await assertIssueCommentAllowed(req, res, issue);
-    if (!commentAccessDecision) return;
-    const commentAuthorizationReason = issueWriteAuthorizationReason(req, commentAccessDecision);
-    if (!assertStructuredCommentFieldsAllowed(req, res, {
-      presentation: req.body.presentation,
-      metadata: req.body.metadata,
-    })) return;
-    const closedExecutionWorkspace = await getClosedIssueExecutionWorkspace(issue);
-
   // GET stays read-only. POST resolves the single chat on explicit add or first send/upload.
   for (const method of ["get", "post"] as const) {
     router[method]("/companies/:companyId/chats/:agentRef", async (req, res) => {
@@ -18154,19 +18130,14 @@ export function issueRoutes(
     validate(addIssueCommentSchema),
     async (req, res) => {
       const id = req.params.id as string;
-      const issue = await getAccessibleResource(
-        req,
-        res,
-        svc.getById(id),
-        "Issue not found",
-      );
+      const issue = await getCommentableIssue(req, res, id);
       if (!issue) return;
       if (issue.conversationAgentId && req.actor.type === "board") {
         if (!(await instanceSettings.getExperimental()).enableAgentChat) throw notFound("Agent Chat is disabled");
         if (!req.actor.userId) throw forbidden("Board user access required");
         if (req.actor.userId !== issue.conversationUserId) throw forbidden("Only the conversation owner can send messages or start a new session");
         if (!req.body.clientRequestId) throw unprocessable("Chat messages require a clientRequestId for safe retries");
-        if (!(await assertAgentIssueCommentAllowed(req, res, issue))) return;
+        if (!(await assertIssueCommentAllowed(req, res, issue))) return;
         if (req.body.body.trim() !== "/new" && !(await assertBoardCommentNotPaused(req, res, issue))) return;
         const actor = getActorInfo(req);
         const userId = req.actor.userId;
@@ -18211,7 +18182,7 @@ export function issueRoutes(
         );
         return;
       }
-      const commentAccessDecision = await assertAgentIssueCommentAllowed(
+      const commentAccessDecision = await assertIssueCommentAllowed(
         req,
         res,
         issue,

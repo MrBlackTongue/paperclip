@@ -1958,6 +1958,8 @@ describeEmbeddedPostgres("authorization service", () => {
       allowed: false,
       reason: "deny_missing_membership",
     });
+  });
+
   it.each(["session", "cloud_tenant"] as const)("allows %s operators to start agents, without granting hiring rights", async (source) => {
     const company = await createCompany(db, "wake");
     const agent = await createAgent(db, company.id);
