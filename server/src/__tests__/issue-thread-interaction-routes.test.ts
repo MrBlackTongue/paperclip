@@ -260,6 +260,13 @@ function createIssue(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function loadAppModules() {
+  return Promise.all([
+    import("../routes/issues.js"),
+    import("../middleware/index.js"),
+  ]);
+}
+
 async function createApp(actor: Record<string, unknown> = {
   type: "board",
   userId: "local-board",
@@ -275,10 +282,7 @@ async function createApp(actor: Record<string, unknown> = {
       responsibleUserId: actor.onBehalfOfUserId ?? null,
     };
   }
-  const [{ issueRoutes }, { errorHandler }] = await Promise.all([
-    import("../routes/issues.js"),
-    import("../middleware/index.js"),
-  ]);
+  const [{ issueRoutes }, { errorHandler }] = await loadAppModules();
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -304,8 +308,8 @@ async function resolveMockInteraction(
   return interaction;
 }
 
-describe.sequential("issue thread interaction routes", () => {
-  beforeEach(() => {
+describe("issue thread interaction routes", () => {
+  beforeEach(async () => {
     vi.resetModules();
     vi.doUnmock("../routes/issues.js");
     vi.doUnmock("../routes/authz.js");
@@ -577,7 +581,9 @@ describe.sequential("issue thread interaction routes", () => {
     mockCrossIssueInfluence.sourceIssueId = ISSUE_ID;
     mockCrossIssueInfluence.priorCount = 0;
     mockCrossIssueInfluence.inserted.length = 0;
-  });
+    // Keep cold route imports in setup rather than the HTTP assertion timeout.
+    await loadAppModules();
+  }, 60_000);
 
   it("creates board-authored interactions", async () => {
     const app = await createApp();
@@ -605,6 +611,23 @@ describe.sequential("issue thread interaction routes", () => {
       }),
     );
   }, 10_000);
+
+  it("normalizes a canonical-only mixed question form at the HTTP boundary", async () => {
+    const questionSet = { schema: "paperclip.question_set.v1", questions: [
+      { id: "repo", prompt: "Repository URL?", required: true, answerMode: "text" },
+      { id: "scope", prompt: "Review scope?", required: true, answerMode: "single_select", options: [{ id: "all", label: "All changes" }, { id: "selected", label: "Selected changes" }] },
+    ] };
+    const res = await request(await createApp())
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions")
+      .send({ kind: "ask_user_questions", payload: { version: 1, questionSet } });
+    expect(res.status).toBe(201);
+    expect(mockInteractionService.create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      payload: expect.objectContaining({ questionSet, questions: [
+        expect.objectContaining({ id: "repo", options: [{ id: "paperclip_text_answer", label: "Type an answer", freeText: true }] }),
+        expect.objectContaining({ id: "scope", options: questionSet.questions[1].options }),
+      ] }),
+    }), expect.anything());
+  });
 
   it("does not run historical-comment catch-up or queue recovery from the interaction read path", async () => {
     mockIssueService.getById.mockResolvedValue(createIssue({
@@ -816,6 +839,30 @@ describe.sequential("issue thread interaction routes", () => {
         action: "issue.thread_interaction_answered",
       }),
     );
+  });
+
+  it.each(["paperclip-id:chat-owner", "chat-owner", "paperclip-id:another-user"])("keeps chat response delivery limited to the exact owner: %s", async (userId) => {
+    const issue = createIssue({ conversationAgentId: ASSIGNEE_AGENT_ID, conversationUserId: "paperclip-id:chat-owner" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockInteractionService.getForIssue.mockResolvedValue({
+      id: "interaction-2", kind: "ask_user_questions", status: "pending",
+      requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only",
+      addresseeUserId: "paperclip-id:chat-owner", continuationPolicy: "wake_assignee",
+      payload: { version: 1, questions: [] },
+    });
+    const app = await createApp({ type: "board", userId, source: "cloud_tenant", companyIds: ["company-1"] });
+    const response = await request(app).post(`/api/issues/${ISSUE_ID}/interactions/interaction-2/respond`)
+      .send({ answers: [{ questionId: "scope", optionIds: ["phase-1"] }] });
+    if (userId === "paperclip-id:chat-owner") {
+      expect(response.status).toBe(200);
+      expect(mockInteractionService.answerQuestions).toHaveBeenCalledWith(expect.anything(), "interaction-2", expect.anything(), expect.objectContaining({ userId }));
+      expect(mockQuestionResponseDeliveries.deliver).toHaveBeenCalledWith("interaction-2");
+    } else {
+      expect(response.status).toBe(403);
+      expect(mockInteractionService.answerQuestions).not.toHaveBeenCalled();
+      expect(mockQuestionResponseDeliveries.deliver).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    }
   });
 
   it("routes wake-on-accept question answers through the same causal delivery service", async () => {
@@ -1678,7 +1725,11 @@ describe.sequential("issue thread interaction routes", () => {
     );
   });
 
-  it("forces a fresh workspace-aware session when accepting a planning confirmation", async () => {
+  it.each([
+    { label: "explicit", targetIssueId: ISSUE_ID },
+    { label: "omitted", targetIssueId: undefined },
+    { label: "null", targetIssueId: null },
+  ])("forces a fresh workspace-aware session when accepting a planning confirmation with $label issueId", async ({ targetIssueId }) => {
     mockIssueService.getById.mockResolvedValueOnce(createIssue({ workMode: "planning" }));
     mockInteractionService.acceptInteraction.mockResolvedValueOnce({
       interaction: {
@@ -1696,7 +1747,7 @@ describe.sequential("issue thread interaction routes", () => {
           prompt: "Approve this plan?",
           target: {
             type: "issue_document",
-            issueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ...(targetIssueId !== undefined ? { issueId: targetIssueId } : {}),
             documentId: "document-plan",
             key: "plan",
             revisionId: "revision-plan",
@@ -1768,6 +1819,45 @@ describe.sequential("issue thread interaction routes", () => {
         }),
       }),
     );
+  });
+
+  it("does not project an explicitly different issue's approved plan into the current issue wake", async () => {
+    mockInteractionService.acceptInteraction.mockResolvedValueOnce({
+      interaction: {
+        id: "interaction-other-plan",
+        companyId: "company-1",
+        issueId: ISSUE_ID,
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "wake_assignee_on_accept",
+        sourceRunId: RUN_1,
+        payload: {
+          version: 1,
+          prompt: "Approve the other issue's plan?",
+          target: {
+            type: "issue_document",
+            issueId: OTHER_ISSUE_ID,
+            key: "plan",
+            revisionId: "other-revision",
+            revisionNumber: 2,
+          },
+        },
+        result: { version: 1, outcome: "accepted" },
+      },
+      createdIssues: [],
+    });
+    const response = await request(await createApp())
+      .post(`/api/issues/${ISSUE_ID}/interactions/interaction-other-plan/accept`)
+      .send({});
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+    const wake = mockHeartbeatService.wakeup.mock.calls[0]?.[1] as unknown as {
+      contextSnapshot: Record<string, unknown>;
+      payload: Record<string, unknown>;
+    };
+    expect(wake.contextSnapshot).not.toHaveProperty("planReviewInteraction");
+    expect(wake.payload).not.toHaveProperty("planReviewInteraction");
+    expect(wake.contextSnapshot).not.toHaveProperty("forceFreshSession");
   });
 
   it("forces a fresh workspace-aware session when accepting a plan document confirmation on a standard-work issue", async () => {

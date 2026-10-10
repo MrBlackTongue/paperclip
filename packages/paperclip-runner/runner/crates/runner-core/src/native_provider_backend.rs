@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::acpx_provider_backend::{AcpxCommandExecutor, ACPX_PROVIDER_STATE_FILE};
+use crate::dot_provider_backend::{DotCommandExecutor, DOT_PROVIDER_STATE_FILE};
 use crate::durable::{
     Command, CommandExecution, CommandExecutor, DurableRunnerConfig, DurableRunnerError,
-    PolledEvent,
+    PolledEvent, TerminalDeliveryReconciliation,
 };
 use crate::managed_provider_backend::{
     ManagedProviderCommandExecutor, MANAGED_PROVIDER_STATE_FILE,
@@ -16,14 +17,33 @@ enum SelectedExecutor {
     LocalFacade(CodexCommandExecutor),
     Acpx(AcpxCommandExecutor),
     Managed(ManagedProviderCommandExecutor),
+    Dot(DotCommandExecutor),
 }
 
 impl CommandExecutor for SelectedExecutor {
+    fn can_reconcile_result_delivery(&mut self) -> Result<bool, DurableRunnerError> {
+        match self {
+            Self::LocalFacade(executor) => executor.can_reconcile_result_delivery(),
+            Self::Acpx(executor) => executor.can_reconcile_result_delivery(),
+            Self::Managed(executor) => executor.can_reconcile_result_delivery(),
+            Self::Dot(executor) => executor.can_reconcile_result_delivery(),
+        }
+    }
+
+    fn retained_events(&mut self) -> Result<Vec<PolledEvent>, DurableRunnerError> {
+        match self {
+            Self::LocalFacade(executor) => executor.retained_events(),
+            Self::Acpx(executor) => executor.retained_events(),
+            Self::Managed(executor) => executor.retained_events(),
+            Self::Dot(executor) => executor.retained_events(),
+        }
+    }
     fn execute(&mut self, command: &Command) -> Result<CommandExecution, DurableRunnerError> {
         match self {
             Self::LocalFacade(executor) => executor.execute(command),
             Self::Acpx(executor) => executor.execute(command),
             Self::Managed(executor) => executor.execute(command),
+            Self::Dot(executor) => executor.execute(command),
         }
     }
 
@@ -32,6 +52,7 @@ impl CommandExecutor for SelectedExecutor {
             Self::LocalFacade(executor) => executor.poll_events(),
             Self::Acpx(executor) => executor.poll_events(),
             Self::Managed(executor) => executor.poll_events(),
+            Self::Dot(executor) => executor.poll_events(),
         }
     }
 
@@ -40,6 +61,16 @@ impl CommandExecutor for SelectedExecutor {
             Self::LocalFacade(executor) => executor.rotate_authority(config),
             Self::Acpx(executor) => executor.rotate_authority(config),
             Self::Managed(executor) => executor.rotate_authority(config),
+            Self::Dot(executor) => executor.rotate_authority(config),
+        }
+    }
+
+    fn maintain_backpressured_provider(&mut self) -> Result<(), DurableRunnerError> {
+        match self {
+            Self::LocalFacade(executor) => executor.maintain_backpressured_provider(),
+            Self::Acpx(executor) => executor.maintain_backpressured_provider(),
+            Self::Managed(executor) => executor.maintain_backpressured_provider(),
+            Self::Dot(executor) => executor.maintain_backpressured_provider(),
         }
     }
 
@@ -48,6 +79,18 @@ impl CommandExecutor for SelectedExecutor {
             Self::LocalFacade(executor) => executor.acknowledge_events(count),
             Self::Acpx(executor) => executor.acknowledge_events(count),
             Self::Managed(executor) => executor.acknowledge_events(count),
+            Self::Dot(executor) => executor.acknowledge_events(count),
+        }
+    }
+
+    fn reconcile_terminal_delivery(
+        &mut self,
+    ) -> Result<TerminalDeliveryReconciliation, DurableRunnerError> {
+        match self {
+            Self::LocalFacade(executor) => executor.reconcile_terminal_delivery(),
+            Self::Acpx(executor) => executor.reconcile_terminal_delivery(),
+            Self::Managed(executor) => executor.reconcile_terminal_delivery(),
+            Self::Dot(executor) => executor.reconcile_terminal_delivery(),
         }
     }
 
@@ -56,6 +99,7 @@ impl CommandExecutor for SelectedExecutor {
             Self::LocalFacade(executor) => executor.shutdown(),
             Self::Acpx(executor) => executor.shutdown(),
             Self::Managed(executor) => executor.shutdown(),
+            Self::Dot(executor) => executor.shutdown(),
         }
     }
 }
@@ -88,7 +132,8 @@ impl NativeProviderCommandExecutor {
         let codex = self.state_dir.join(CODEX_PROVIDER_STATE_FILE).exists();
         let acpx = self.state_dir.join(ACPX_PROVIDER_STATE_FILE).exists();
         let managed = self.state_dir.join(MANAGED_PROVIDER_STATE_FILE).exists();
-        if [codex, acpx, managed]
+        let dot = self.state_dir.join(DOT_PROVIDER_STATE_FILE).exists();
+        if [codex, acpx, managed, dot]
             .into_iter()
             .filter(|present| *present)
             .count()
@@ -98,7 +143,11 @@ impl NativeProviderCommandExecutor {
                 "runner state contains conflicting provider authorities",
             ));
         }
-        self.selected = if managed {
+        self.selected = if dot {
+            Some(SelectedExecutor::Dot(
+                DotCommandExecutor::with_runner_config(&self.state_dir, &self.config),
+            ))
+        } else if managed {
             Some(SelectedExecutor::Managed(
                 ManagedProviderCommandExecutor::with_runner_config(&self.state_dir, &self.config),
             ))
@@ -126,6 +175,10 @@ impl NativeProviderCommandExecutor {
                 )
             })?;
         self.selected = Some(match kind {
+            "openai_dot" => SelectedExecutor::Dot(DotCommandExecutor::with_runner_config(
+                &self.state_dir,
+                &self.config,
+            )),
             "codex" | "opencode" => SelectedExecutor::LocalFacade(
                 CodexCommandExecutor::with_runner_config(&self.state_dir, &self.config),
             ),
@@ -147,6 +200,18 @@ impl NativeProviderCommandExecutor {
 }
 
 impl CommandExecutor for NativeProviderCommandExecutor {
+    fn can_reconcile_result_delivery(&mut self) -> Result<bool, DurableRunnerError> {
+        self.select_recovery()?;
+        self.selected
+            .as_mut()
+            .map_or(Ok(false), CommandExecutor::can_reconcile_result_delivery)
+    }
+
+    fn retained_events(&mut self) -> Result<Vec<PolledEvent>, DurableRunnerError> {
+        self.selected
+            .as_mut()
+            .map_or_else(|| Ok(Vec::new()), CommandExecutor::retained_events)
+    }
     fn execute(&mut self, command: &Command) -> Result<CommandExecution, DurableRunnerError> {
         self.select_recovery()?;
         if self.selected.is_none()
@@ -171,6 +236,14 @@ impl CommandExecutor for NativeProviderCommandExecutor {
             .map_or_else(|| Ok(Vec::new()), CommandExecutor::poll_events)
     }
 
+    fn maintain_backpressured_provider(&mut self) -> Result<(), DurableRunnerError> {
+        // A provider that has not yet been selected/restored cannot have
+        // in-process cleanup to advance. Never launch one merely for ACK debt.
+        self.selected
+            .as_mut()
+            .map_or_else(|| Ok(()), CommandExecutor::maintain_backpressured_provider)
+    }
+
     fn rotate_authority(&mut self, config: &DurableRunnerConfig) {
         self.config = config.clone();
         if let Some(executor) = self.selected.as_mut() {
@@ -189,6 +262,18 @@ impl CommandExecutor for NativeProviderCommandExecutor {
                 "cannot acknowledge provider events before provider selection",
             ))
         }
+    }
+
+    fn reconcile_terminal_delivery(
+        &mut self,
+    ) -> Result<TerminalDeliveryReconciliation, DurableRunnerError> {
+        // Selection only loads the provider authority. The selected executor
+        // decides whether terminal delivery can settle without a cold launch.
+        self.select_recovery()?;
+        self.selected.as_mut().map_or_else(
+            || Ok(TerminalDeliveryReconciliation::CleanupCompleted),
+            CommandExecutor::reconcile_terminal_delivery,
+        )
     }
 
     fn shutdown(&mut self) -> Result<(), DurableRunnerError> {

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "../context/ToastContext";
 import type { BuiltInAgentState } from "../api/builtInAgents";
 import { Agents } from "./Agents";
+import { Agents as ProductionAgents } from "./Agents.production";
 import type { AgentOrgChainHealth } from "@paperclipai/shared";
 
 const mockRouterState = vi.hoisted(() => ({
@@ -228,7 +229,6 @@ function makeInstanceSettings({
     defaultEnvironmentId,
     general: {
       censorUsernameInLogs: true,
-      keyboardShortcuts: true,
       feedbackDataSharingPreference: "prompt",
       backupRetention: {
         dailyDays: 7,
@@ -241,6 +241,7 @@ function makeInstanceSettings({
       enableEnvironments,
       enableIsolatedWorkspaces: true,
       enableStreamlinedLeftNavigation: false,
+      enableAgentChat: false,
       enableConferenceRoomChat: false,
       enableIssuePlanDecompositions: true,
       enableExperimentalFileViewer: false,
@@ -355,6 +356,40 @@ describe("Agents", () => {
     container.remove();
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it.each([
+    ["streamlined", Agents],
+    ["production", ProductionAgents],
+  ] as const)("omits the action bar from %s agent list rows", async (_mode, AgentList) => {
+    mockAgentsApi.list.mockResolvedValue([
+      makeAgent({ name: "Alpha", status: "active" }),
+      makeAgent({ id: "agent-paused", name: "Paused agent", status: "paused" }),
+    ]);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <AgentList />
+          </ToastProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    const listToggle = container.querySelector<HTMLButtonElement>('button[aria-label="List view"]');
+    await act(async () => { listToggle?.click(); });
+    await flushReact();
+
+    for (const name of ["Alpha", "Paused agent"]) {
+      const row = findAgentRow(container, name);
+      expect(row).not.toBeNull();
+      expect(row?.getAttribute("href")).toMatch(/^\/agents\//);
+      expect(row?.querySelector('button[aria-label^="Open actions for"]')).toBeNull();
+      const buttons = Array.from(row?.querySelectorAll("button") ?? []).map((button) => button.textContent);
+      expect(buttons).not.toEqual(expect.arrayContaining([expect.stringMatching(/Assign Task|Run Heartbeat|Run with provider trace|Pause|Resume/)]));
+    }
   });
 
   it("shows the configured model beside the adapter on the all agents page", async () => {
@@ -479,15 +514,11 @@ describe("Agents", () => {
     expect(subtitle).toBeDefined();
     expect(subtitle?.classList.contains("truncate")).toBe(true);
     const actions = row?.querySelector('button[aria-label="Open actions for Paperclip Engineer With A Much Longer Display Name"]');
-    expect(actions).not.toBeNull();
-    // Neither the action button nor its ancestors may hide the mobile menu.
-    for (let node = actions; node && node !== row; node = node.parentElement) {
-      expect(node.classList.contains("hidden")).toBe(false);
-    }
-    await act(async () => { (actions as HTMLButtonElement).click(); });
-    await flushReact();
-    expect(document.body.textContent).toContain("Duplicate");
-    expect(document.body.textContent).toContain("Terminate");
+    expect(actions).toBeNull();
+    expect(row?.textContent).not.toContain("Assign Task");
+    expect(row?.textContent).not.toContain("Run Heartbeat");
+    expect(row?.textContent).not.toContain("Run with provider trace");
+    expect(row?.textContent).not.toContain("Pause");
   });
 
   it("uses the built-in agents route segment as the built-in filter", async () => {
@@ -974,13 +1005,16 @@ describe("Agents", () => {
     expect(container.querySelector(".min-w-\\(--sz-7rem\\)")).toBeNull();
   });
 
-  it("keeps row membership actions reachable while hiding star actions on mobile", async () => {
+  it.each([
+    ["streamlined", Agents],
+    ["production", ProductionAgents],
+  ] as const)("omits star and leave/join actions from %s agent index list and org views", async (_mode, AgentList) => {
     root = createRoot(container);
     await act(async () => {
       root!.render(
         <QueryClientProvider client={queryClient}>
           <ToastProvider>
-            <Agents />
+            <AgentList />
           </ToastProvider>
         </QueryClientProvider>,
       );
@@ -988,29 +1022,31 @@ describe("Agents", () => {
     await flushReact();
     await flushReact();
 
-    // List view (default).
-    const orgAction = container.querySelector('[aria-label="Leave Alpha"]');
-    const orgStar = container.querySelector('[aria-label="Star Alpha"]');
-    expect(orgAction).not.toBeNull();
-    expect(orgStar).not.toBeNull();
-    expect(orgAction?.closest(".hidden")).toBeNull();
-    expect(orgStar?.closest(".hidden")).not.toBeNull();
-
-    // List view remains stable after explicitly selecting it.
-    const listToggle = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.querySelector("svg.lucide-list"),
-    );
+    // Explicitly select the list view and assert the row renders there.
+    const listToggle = container.querySelector<HTMLButtonElement>('button[aria-label="List view"]');
+    expect(listToggle).not.toBeNull();
     await act(async () => {
       listToggle!.click();
     });
     await flushReact();
+    const listRow = findAgentRow(container, "Alpha");
+    expect(listRow).not.toBeNull();
+    expect(container.querySelector('[aria-label="Leave Alpha"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Join Alpha"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Star Alpha"]')).toBeNull();
 
-    const listAction = container.querySelector('[aria-label="Leave Alpha"]');
-    const listStar = container.querySelector('[aria-label="Star Alpha"]');
-    expect(listAction).not.toBeNull();
-    expect(listStar).not.toBeNull();
-    expect(listAction?.closest(".hidden")).toBeNull();
-    expect(listStar?.closest(".hidden")).not.toBeNull();
+    // Explicitly select the org view and assert no membership actions there.
+    const orgToggle = container.querySelector<HTMLButtonElement>('button[aria-label="Org chart view"]');
+    expect(orgToggle).not.toBeNull();
+    await act(async () => {
+      orgToggle!.click();
+    });
+    await flushReact();
+    await flushReact();
+    expect(container.textContent).toContain("Alpha");
+    expect(container.querySelector('[aria-label="Leave Alpha"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Join Alpha"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Star Alpha"]')).toBeNull();
   });
 
   it("does not dim left-membership agent names on mobile", async () => {

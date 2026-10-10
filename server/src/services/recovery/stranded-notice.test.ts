@@ -67,6 +67,31 @@ describe("stranded recovery notice seeds", () => {
     expect(buildConfigurationIncompleteRecoveryNoticeSeed(null).body).toContain("secret/env bindings");
   });
 
+  it("explains an unresolved workspace base ref and carries its remedy into the recovery card", () => {
+    const seed = buildConfigurationIncompleteRecoveryNoticeSeed({
+      reason: "workspace_base_ref_unresolved",
+      requestedRef: "main",
+      attemptedRefs: ["origin/main"],
+      fetchError: "fatal: couldn't find remote ref refs/heads/main",
+      missingBindings: [],
+    });
+    const notice = buildStrandedRecoveryEscalationNotice({
+      seed,
+      recoveryActionId: "base-ref-recovery",
+      recoveryOwner: null,
+      sourceRun: { id: "failed-run", status: "failed", errorCode: "configuration_incomplete" },
+    });
+    expect(notice.presentation.title).toBe("Workspace base ref unavailable");
+    expect(notice.body).toContain("before the agent started");
+    expect(notice.body).toContain("base ref");
+    expect(notice.body).not.toContain("secret/env bindings");
+    expect(allRows(notice.metadata)).toContainEqual({
+      type: "key_value",
+      label: "Next action",
+      value: "Check that the configured base ref exists and the repository is accessible. Correct the task or project workspace settings, then retry the task.",
+    });
+  });
+
   it("distinguishes todo dispatch from in_progress continuation copy", () => {
     expect(buildImmediateExecutionPathRecoveryNoticeSeed({ status: "todo" }).body).toContain("retried dispatch");
     expect(buildImmediateExecutionPathRecoveryNoticeSeed({ status: "in_progress" }).body).toContain(
@@ -76,6 +101,18 @@ describe("stranded recovery notice seeds", () => {
 });
 
 describe("buildStrandedRecoveryEscalationNotice", () => {
+  it("names a workspace timeout and its repair instead of claiming generic continuation", () => {
+    const notice = buildStrandedRecoveryEscalationNotice({
+      seed: buildImmediateExecutionPathRecoveryNoticeSeed({ status: "in_progress" }),
+      recoveryActionId: "scan-recovery",
+      recoveryOwner: null,
+      sourceRun: { id: "failed-run", status: "failed", errorCode: "workspace_git_scan_timeout" },
+    });
+    expect(notice.presentation.title).toBe("Workspace scan timed out");
+    expect(notice.body).toContain("before the agent started");
+    expect(notice.body).not.toContain("retried continuation");
+    expect(JSON.stringify(notice.metadata)).toContain("repository access and server load");
+  });
   const actionId = "6a2f8e64-6f5e-4b58-b7fd-111111111111";
   const owner = { id: "9b1c2d3e-4f50-4a61-8b72-222222222222", name: "CTO" };
   const sourceRun = {
@@ -240,4 +277,13 @@ describe("buildStrandedRecoveryEscalationNotice", () => {
       noticeMetadataReferencesRecoveryAction(notice.metadata, "1f2e3d4c-5b6a-4798-8899-444444444444"),
     ).toBe(false);
   });
+});
+
+
+it("names the unavailable AI account instead of suggesting secret bindings", () => {
+  const notice = buildConfigurationIncompleteRecoveryNoticeSeed({ reason: "ai_connection_unavailable", provider: "openai" });
+  expect(notice.nextAction).toContain("Reconnect the selected AI account");
+  expect(notice.title).toBe("AI connection needs attention");
+  expect(notice.body).toContain("Reconnect the account");
+  expect(notice.body).not.toContain("secret/env");
 });

@@ -6,6 +6,7 @@ import { formatAssigneeUserLabel } from "../lib/assignees";
 import { describeInteractionAudience, type InteractionAudienceDescription } from "../lib/interaction-audience";
 import { interactionResolutionErrorMessage } from "../lib/interaction-resolution-error";
 import {
+  isInteractionPreparingApproval,
   buildSuggestedTaskTree,
   collectSuggestedTaskClientKeys,
   countSuggestedTaskNodes,
@@ -30,6 +31,7 @@ import {
   type SuggestedTaskTreeNode,
 } from "../lib/issue-thread-interactions";
 import { cn, formatDateTime, formatShortDate } from "../lib/utils";
+import { InteractionPreparationNotice } from "./InteractionPreparationNotice";
 import { InteractionAudienceLine } from "./InteractionAudienceLine";
 import { MarkdownBody, type MarkdownExternalReferenceMap } from "./MarkdownBody";
 import { Button } from "./ui/button";
@@ -44,6 +46,7 @@ import { ProposalJustification } from "../pages/secrets/proposal-review";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { AppLogo } from "@/pages/apps/AppLogo";
 import { ConnectionIntentInteractionBody } from "@/features/connections/ConnectionIntentInteractionBody";
+import { QuestionForm } from "./task-chat/QuestionForm";
 
 const OTHER_ANSWER_ID = "__paperclip_other__";
 
@@ -1194,7 +1197,46 @@ function AskUserQuestionsCard({
         </span>
       </div>
 
-      {interaction.status === "pending" ? (
+      {interaction.status === "pending" && interaction.payload.questionSet ? (
+        <QuestionForm
+          id={interaction.id}
+          questionSet={interaction.payload.questionSet}
+          draftKey={`issue-question:${interaction.companyId}:${interaction.id}`}
+          disabled={!onSubmitInteractionAnswers}
+          initialResponse={interaction.result?.answers ? {
+            schema: "paperclip.question_response.v1",
+            answers: Object.fromEntries(interaction.result.answers.map((answer) => [
+              answer.questionId,
+              interaction.payload.questionSet!.questions.find((question) => question.id === answer.questionId)?.answerMode === "text"
+                ? { text: answer.otherText ?? "" }
+                : { selectedOptionIds: answer.optionIds, ...(typeof answer.otherText === "string" ? { customText: answer.otherText } : {}) },
+            ])),
+          } : null}
+          onSubmit={async (response) => {
+            const answers = interaction.payload.questionSet!.questions.map((question) => {
+              const answer = response.answers[question.id];
+              const otherText = question.answerMode === "text" ? answer?.text : answer?.customText?.trim();
+              return {
+                questionId: question.id,
+                optionIds: question.answerMode === "text" ? [] : (answer?.selectedOptionIds ?? []),
+                ...(otherText !== undefined ? { otherText } : {}),
+              };
+            });
+            try {
+              await onSubmitInteractionAnswers?.(interaction, answers);
+            } catch (error) {
+              throw new Error(resolutionErrorMessage(error));
+            }
+          }}
+          onCancel={onCancelInteraction ? async () => {
+            try {
+              await onCancelInteraction(interaction);
+            } catch (error) {
+              throw new Error(resolutionErrorMessage(error));
+            }
+          } : undefined}
+        />
+      ) : interaction.status === "pending" ? (
         <div className="space-y-4">
           {questions.map((question, index) => {
             const hasFreeTextOption = question.options.some(
@@ -2027,6 +2069,7 @@ function RequestSecretProposalCard({
           reasonPlaceholder={interaction.payload.declineReasonPlaceholder ?? "Optional: explain why this binding should not be created."}
           working={working}
           actionError={actionError}
+          preparingApproval={isInteractionPreparingApproval(interaction)}
           canApprove={Boolean(onAcceptInteraction)}
           canReject={Boolean(onRejectInteraction)}
           onApprove={() => void handleAccept()}
@@ -2077,6 +2120,7 @@ function ConfirmationActionRow({
   working,
   actionError,
   approveDisabled = false,
+  preparingApproval = false,
   canApprove,
   canReject,
   onApprove,
@@ -2100,6 +2144,7 @@ function ConfirmationActionRow({
   working: "accept" | "reject" | null;
   actionError: string | null;
   approveDisabled?: boolean;
+  preparingApproval?: boolean;
   canApprove: boolean;
   canReject: boolean;
   onApprove: () => void;
@@ -2137,6 +2182,7 @@ function ConfirmationActionRow({
 
   return (
     <div className="space-y-3">
+      {preparingApproval ? <InteractionPreparationNotice /> : null}
       <div
         data-testid="confirmation-actions"
         data-mobile-layout={stackActionsOnMobile ? "stacked" : "inline"}
@@ -2151,7 +2197,7 @@ function ConfirmationActionRow({
           size="sm"
           variant={revising ? "outline" : approveVariant}
           className={stackActionsOnMobile ? "col-span-2 w-full sm:col-auto sm:w-auto" : undefined}
-          disabled={!canApprove || working !== null || approveDisabled}
+          disabled={!canApprove || working !== null || approveDisabled || preparingApproval}
           onClick={onApprove}
         >
           {working === "accept" ? (
@@ -2637,6 +2683,7 @@ function RequestConfirmationCard({
           reasonPlaceholder={reasonPlaceholder}
           working={working}
           actionError={actionError}
+          preparingApproval={isInteractionPreparingApproval(interaction)}
           canApprove={Boolean(onAcceptInteraction)}
           canReject={Boolean(onRejectInteraction)}
           onApprove={() => void handleAccept()}
@@ -3054,6 +3101,7 @@ function RequestCheckboxConfirmationCard({
           reasonPlaceholder={reasonPlaceholder}
           working={working}
           actionError={actionError}
+          preparingApproval={isInteractionPreparingApproval(interaction)}
           canApprove={Boolean(onAcceptInteraction)}
           canReject={Boolean(onRejectInteraction)}
           onApprove={() => void handleAccept()}
@@ -3676,6 +3724,17 @@ export function IssueThreadInteractionCard({
     creatorLabel: createdByLabel,
     addresseeLabel,
   });
+  if (interaction.kind === "connection_intent" && interaction.payload.accessRequest) {
+    return (
+      <div id={`interaction-${interaction.id}`}>
+        <ConnectionIntentInteractionBody
+          interaction={interaction}
+          currentUserId={currentUserId}
+          addresseeLabel={addresseeLabel ?? "the addressed person"}
+        />
+      </div>
+    );
+  }
   if (isToolAction && interaction.kind === "request_confirmation" && toolActionState) {
     return (
       <InteractionAudienceContext.Provider value={audience}>
@@ -3856,6 +3915,7 @@ export function IssueThreadInteractionCard({
               interaction={interaction}
               currentUserId={currentUserId}
               addresseeLabel={addresseeLabel ?? "the addressed person"}
+              addresseeName={interaction.addresseeUserId ? userLabelMap?.get(interaction.addresseeUserId) : undefined}
             />
           ) : interaction.kind === "request_item_verdicts" ? (
             <RequestItemVerdictsCard

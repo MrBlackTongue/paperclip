@@ -67,15 +67,21 @@ export type {
 };
 
 export type ToolActorType = "agent" | "user" | "system" | "plugin";
-export type ToolConnectionTransport = "mcp_remote" | "rest_api" | "local_stdio";
+export type ToolConnectionTransport =
+  "mcp_remote" | "rest_api" | "local_stdio" | "chat_sdk" | "runtime_auth" | "voice";
+export type ToolConnectionPurpose = "tool" | "channel" | "ai";
 export type ToolConnectionAuthKind = "oauth" | "api_key" | "none";
-export type ToolConnectionOwnership = "platform_shared" | "platform_provisioned" | "customer" | "dcr";
-export type ToolConnectionCredentialSource = "paperclip_vault" | "vercel_connect";
+export type ToolConnectionOwnership =
+  "platform_shared" | "platform_provisioned" | "customer" | "dcr";
+export type ToolConnectionCredentialSource =
+  "paperclip_vault" | "vercel_connect";
 export type ToolConnectionStatus = "draft" | "active" | "disabled" | "archived";
 export type ToolConnectionInstallTargetType = "company" | "agent";
 export type ConnectionGrantKind = "organization" | "user" | "agent";
-export type ConnectionGrantStatus = "active" | "revoked" | "expired" | "needs_reauthorization";
-export type ToolConnectionCredentialPolicy = "shared" | "per_user" | "per_user_with_fallback" | "per_agent";
+export type ConnectionGrantStatus =
+  "active" | "revoked" | "expired" | "needs_reauthorization";
+export type ToolConnectionCredentialPolicy =
+  "shared" | "per_user" | "per_user_with_fallback" | "per_agent";
 export type ConnectionGrantMemberSubjectType = "user";
 export type ToolCredentialPlacement = "header" | "env" | "url";
 
@@ -159,12 +165,14 @@ export interface ToolApplication {
 }
 
 export interface ToolConnection {
+  agentInstructions?: import("../connection-instructions.js").ConnectionAgentInstructions | null;
   id: string;
   companyId: string;
   applicationId: string;
   name: string;
   uid: string;
   connectionKind: ToolConnectionKind;
+  connectionPurpose: ToolConnectionPurpose;
   ownership: ToolConnectionOwnership;
   transport: ToolConnectionTransport;
   authKind: ToolConnectionAuthKind;
@@ -175,8 +183,12 @@ export interface ToolConnection {
   transportConfig: Record<string, unknown>;
   config?: Record<string, unknown>;
   credentialSecretRefs: ToolCredentialSecretRef[];
+  /** Saved client secret for the requesting user, or the shared connection. Never includes secret material. */
+  hasSavedOAuthClientSecret?: boolean;
   credentialRefs?: McpConnectionCredentialRef[];
   healthStatus: ToolConnectionHealthStatus;
+  /** Managed GitHub grant state; transient health failures do not require sign-in. */
+  requiresReauthorization?: boolean;
   healthMessage?: string | null;
   healthCheckedAt: Date | null;
   lastHealthAt?: Date | string | null;
@@ -207,6 +219,20 @@ export interface ConnectionGrant {
       strategy?: string;
       accessTokenExpiresAt?: string | null;
       scopes?: string[];
+      /**
+       * Whether `scopes` is what the provider asserted, or only what we requested.
+       * `requested_fallback` means the token response carried no `scope`, so the value is
+       * inferred from the request per RFC 6749 §5.1 and is not a provider assertion.
+       */
+      scopeSource?: "provider" | "requested_fallback";
+      /** Scopes the provider asserted that we never asked for. Empty unless it over-granted. */
+      unrequestedScopes?: string[];
+      /**
+       * The scopes the authorization URL sent for *this* grant, kept per-grant because two
+       * users can authorize the same connection with different scopes. A refresh has no fresh
+       * request, so this is the baseline its response is judged against.
+       */
+      requestedScopes?: string[];
       tokenType?: string;
       refreshTokenExpiresAt?: string;
       refreshedAt?: string;
@@ -215,6 +241,7 @@ export interface ConnectionGrant {
         expiresAt?: string;
       };
     };
+    slackSearch?: { endpointId: string; workspaceId: string; slackUserId: string; clientRevision: string };
     github?: {
       userId: string;
       login: string;
@@ -225,7 +252,13 @@ export interface ConnectionGrant {
       installationIds: string[];
       installationOwnerLogins: string[];
       /** Repository metadata visible to this credential; refreshed from GitHub. */
-      repositories?: Array<{ id: string; fullName: string; installationId: string; private?: boolean }>;
+      repositories?: Array<{
+        id: string;
+        fullName: string;
+        installationId: string;
+        ownerType?: "personal" | "organization";
+        private?: boolean;
+      }>;
       installationUrl?: string;
       managementUrl?: string;
       appSlug?: string;
@@ -393,7 +426,8 @@ export interface ToolConnectionRemovalResult {
 }
 
 export type ConnectionTokenScope = string | string[];
-export type ConnectionTokenSubject = { type: "app" } | { type: "user"; userId: string };
+export type ConnectionTokenSubject =
+  { type: "app" } | { type: "user"; userId: string };
 
 export const CONNECTION_RECOVERABLE_ERROR_CODES = [
   "user_authorization_required",
@@ -408,7 +442,8 @@ export const CONNECTION_RECOVERABLE_ERROR_CODES = [
   "standing_delegation_required",
 ] as const;
 
-export type ConnectionRecoverableErrorCode = typeof CONNECTION_RECOVERABLE_ERROR_CODES[number];
+export type ConnectionRecoverableErrorCode =
+  (typeof CONNECTION_RECOVERABLE_ERROR_CODES)[number];
 
 export interface ConnectionRecoverableErrorPayload {
   code: ConnectionRecoverableErrorCode;
@@ -461,7 +496,8 @@ export interface ConnectionTokenUseEnvLeaseResponse {
   attribution: ConnectionTokenAttribution;
 }
 
-export type ConnectionTokenResponse = ConnectionTokenMintedResponse | ConnectionTokenUseEnvLeaseResponse;
+export type ConnectionTokenResponse =
+  ConnectionTokenMintedResponse | ConnectionTokenUseEnvLeaseResponse;
 
 export interface StartConnectionAuthorizationRequest {
   subjectUserId: string;
@@ -475,7 +511,11 @@ export interface StartConnectionAuthorizationResponse {
 
 export interface ConnectionUsageDailyBucket {
   date: string;
-  issuances: { total: number; byOutcome: Record<string, number>; byPath: Record<string, number> };
+  issuances: {
+    total: number;
+    byOutcome: Record<string, number>;
+    byPath: Record<string, number>;
+  };
   invocations: { total: number; byRiskLevel: Record<string, number> };
   deliveries: { received: number; forwarded: number };
 }
@@ -1004,16 +1044,22 @@ export interface ToolConnectionActivityResponse {
   connectionId: string;
   events: ToolCallEvent[];
   lifecycleEvents: ToolConnectionLifecycleEvent[];
-  issues: Record<string, {
-    identifier: string;
-    title: string;
-  }>;
-  actionRequests: Record<string, {
-    status: ToolActionRequestStatus;
-    resolverDisplayName: string | null;
-    resolvedByAgentId: string | null;
-    resolvedByUserId: string | null;
-  }>;
+  issues: Record<
+    string,
+    {
+      identifier: string;
+      title: string;
+    }
+  >;
+  actionRequests: Record<
+    string,
+    {
+      status: ToolActionRequestStatus;
+      resolverDisplayName: string | null;
+      resolvedByAgentId: string | null;
+      resolvedByUserId: string | null;
+    }
+  >;
 }
 
 /**
@@ -1123,7 +1169,8 @@ export interface ToolAppConnectionActionSummary {
  * that issuer, then a Client ID Metadata Document, then dynamic registration,
  * then client credentials the operator preregistered and pasted in.
  */
-export type ToolOAuthClientRegistrationSource = "preconfigured" | "cimd" | "dcr" | "manual";
+export type ToolOAuthClientRegistrationSource =
+  "preconfigured" | "cimd" | "dcr" | "manual";
 
 /** Opaque managed-Cloud exchange; clients never treat the session as a URL. */
 export interface ToolOAuthHandoff {
@@ -1453,7 +1500,15 @@ export interface ToolPolicyConditions {
     isWrite?: boolean;
     isDestructive?: boolean;
   };
-  credentialScope?: Pick<ToolAccessSelector, "applicationId" | "applicationIds" | "connectionId" | "connectionIds" | "catalogEntryId" | "catalogEntryIds"> & {
+  credentialScope?: Pick<
+    ToolAccessSelector,
+    | "applicationId"
+    | "applicationIds"
+    | "connectionId"
+    | "connectionIds"
+    | "catalogEntryId"
+    | "catalogEntryIds"
+  > & {
     applicationKey?: string;
     applicationKeys?: string[];
     providerType?: string;
@@ -1621,6 +1676,17 @@ export interface ToolConnectionTestAgentAccessResponse {
   access: ToolConnectionAccessSummary;
 }
 
+export interface ToolUpstreamPending {
+  kind: "authorization" | "approval";
+  links: Array<{ url: string; host: string; elicitationId?: string }>;
+  executionId?: string;
+  elicitationId?: string;
+  resumeTool?: string;
+  expiresAt?: string;
+  message?: string;
+  requestedSchema?: Record<string, unknown>;
+}
+
 /** Result of `POST /tool-connections/:id/test-calls`. */
 export interface ToolConnectionTestCallResult {
   decision: ToolConnectionTestDecision;
@@ -1631,6 +1697,8 @@ export interface ToolConnectionTestCallResult {
   error?: { message: string; reasonCode: ToolAccessReasonCode | string | null };
   /** Present (with `decision: "ask_first"`) — the parked approval request. */
   actionRequestId?: string;
+  /** Provider handoff, distinct from a Paperclip permission approval. */
+  upstreamPending?: ToolUpstreamPending;
 }
 
 /**
@@ -1645,12 +1713,7 @@ export interface ToolConnectionTestCallResult {
  * - `expired`   — the approval window lapsed.
  */
 export type ToolConnectionTestCallStatusPhase =
-  | "waiting"
-  | "running"
-  | "done"
-  | "denied"
-  | "cancelled"
-  | "expired";
+  "waiting" | "running" | "done" | "denied" | "cancelled" | "expired";
 
 /** Live status of an ask-first test call (`GET /tool-connections/:id/test-calls/:actionRequestId`). */
 export interface ToolConnectionTestCallStatus {
@@ -1661,6 +1724,7 @@ export interface ToolConnectionTestCallStatus {
   parameters?: Record<string, unknown> | null;
   /** Present once `phase === "done"` and the tool succeeded. */
   result?: unknown;
+  upstreamPending?: ToolUpstreamPending;
   /** Present once `phase === "done"` and the tool failed, or when the request was denied/expired. */
   error?: { message: string; reasonCode: ToolAccessReasonCode | string | null };
   /** Wall-clock duration of the executed call in ms, when known. */

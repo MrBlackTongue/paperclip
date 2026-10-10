@@ -6,6 +6,7 @@ import {
   History,
   KeyRound,
   Library,
+  MessageSquare,
   PlayCircle,
   ReceiptText,
   Settings2,
@@ -33,6 +34,7 @@ const localIcons = {
   runtime: Settings2,
   secrets: ShieldCheck,
   tools: Wrench,
+  channels: MessageSquare,
   permissions: ShieldCheck,
   "api-keys": KeyRound,
   revisions: History,
@@ -92,17 +94,18 @@ export function AgentContextualSidebar({
               {section.label}
             </p>
             <div data-slot="contextual-sidebar-group" className={contextualSidebarStyles.group}>
-              {section.items.map((item) => {
-                const href = agentDetailHref(agentRef, item.value);
-                return (
-                  <SidebarNavItem
-                    key={item.value}
-                    to={href}
-                    label={labels?.[item.value] ?? item.label}
-                    icon={localIcons[item.value]}
-                  />
-                );
-              })}
+              {section.items
+                .map((item) => {
+                  const href = agentDetailHref(agentRef, item.value);
+                  return (
+                    <SidebarNavItem
+                      key={item.value}
+                      to={href}
+                      label={labels?.[item.value] ?? item.label}
+                      icon={localIcons[item.value]}
+                    />
+                  );
+                })}
             </div>
           </div>
         ))}

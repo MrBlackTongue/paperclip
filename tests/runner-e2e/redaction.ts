@@ -4,6 +4,7 @@ import path from "node:path";
 import { redactDiagnosticText } from "../../packages/adapter-utils/src/command-redaction.js";
 
 const SECRET_SHAPES = [
+  /\b(?:github_pat_|ghp_)[A-Za-z0-9_]{16,}\b/g,
   /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g,
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/g,
   /\b(?:openrouter|daytona)[-_]?(?:api)?[-_]?key["'=:\s]+[A-Za-z0-9._-]{12,}\b/gi,
@@ -14,11 +15,27 @@ const SENSITIVE_JSON_KEY =
 
 export function normalizedSecrets(values: readonly (string | undefined)[]) {
   return [
-    ...new Set(
-      values
-        .map((value) => value?.trim())
-        .filter((value): value is string => Boolean(value)),
-    ),
+    ...new Set(values.flatMap((value) => {
+      const trimmed = value?.trim();
+      if (!trimmed) return [];
+      if (trimmed.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(trimmed) as unknown;
+          // Subscription credentials are structured JSON. A log may contain an
+          // individual token or identity rather than the whole serialized file.
+          const leaves = (value: unknown, depth = 0): string[] => {
+            if (depth > 8) return [];
+            if (typeof value === "string") return value.length >= 8 ? [value] : [];
+            if (!value || typeof value !== "object") return [];
+            return Object.entries(value).flatMap(([key, child]) => [
+              ...(key.includes("::") ? [key] : []), ...leaves(child, depth + 1),
+            ]);
+          };
+          return [trimmed, ...leaves(parsed)];
+        } catch { /* Preserve ordinary non-JSON secrets. */ }
+      }
+      return [trimmed];
+    })),
   ].sort((left, right) => right.length - left.length);
 }
 
@@ -38,6 +55,14 @@ export function isEphemeralCodexRuntimeAuthFile(
       relative,
     )
   );
+}
+
+/** Browser navigation diagnostics need a route, never OAuth query credentials. */
+export function browserDiagnosticUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.origin + url.pathname : "[non-HTTP URL]";
+  } catch { return "[invalid URL]"; }
 }
 
 export function redactText(value: string, secrets: readonly string[]) {
@@ -152,12 +177,26 @@ export function assertSecretFree(
   if (leak) throw new Error(`Secret leak in ${label}: ${leak}`);
 }
 
+export function isEphemeralPostgresPidFile(paperclipHome: string, file: string): boolean {
+  const relative = path.relative(paperclipHome, file).split(path.sep).join("/");
+  return /^instances\/[^/]+\/db\/postmaster\.pid$/.test(relative);
+}
+
+export function isEphemeralPostgresScanFile(paperclipHome: string, file: string): boolean {
+  const relative = path.relative(paperclipHome, file).split(path.sep).join("/");
+  // A relation can be unlinked during PostgreSQL shutdown/checkpoint. Existing
+  // files are always scanned; this predicate only permits ENOENT after readdir.
+  return isEphemeralPostgresPidFile(paperclipHome, file) ||
+    /^instances\/[^/]+\/db\/base\/\d+\/\d+(?:_(?:fsm|vm|init))?(?:\.\d+)?$/.test(relative);
+}
+
 export async function findSecretLeakInDirectory(
   root: string,
   secrets: readonly string[],
   options: {
     includeShapes?: boolean;
     ignoreFile?: (file: string) => boolean;
+    allowDisappearedFile?: (file: string) => boolean;
   } = {},
 ): Promise<{ file: string; reason: string } | null> {
   const overlap = Math.max(
@@ -179,14 +218,22 @@ export async function findSecretLeakInDirectory(
       } else if (entry.isFile()) {
         if (options.ignoreFile?.(file)) continue;
         let carry = Buffer.alloc(0);
-        for await (const chunk of createReadStream(file)) {
-          const data = Buffer.concat([
-            carry,
-            Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
-          ]);
-          const reason = findSecretLeak(data, secrets, options);
-          if (reason) return { file, reason };
-          carry = data.subarray(Math.max(0, data.length - overlap));
+        try {
+          for await (const chunk of createReadStream(file)) {
+            const data = Buffer.concat([
+              carry,
+              Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+            ]);
+            const reason = findSecretLeak(data, secrets, options);
+            if (reason) return { file, reason };
+            carry = data.subarray(Math.max(0, data.length - overlap));
+          }
+        } catch (error) {
+          // PostgreSQL removes its PID file on shutdown, possibly after readdir.
+          // Existing contents are still scanned; only the caller's exact
+          // transient paths may disappear. Evidence and other I/O errors fail.
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT" ||
+              !options.allowDisappearedFile?.(file)) throw error;
         }
       }
     }

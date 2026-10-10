@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
-import { readSubscriptionAccountId } from "./codex-auth-cache.js";
+import { isCodexAuthCachePath, readSubscriptionAccountId } from "./codex-auth-cache.js";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
@@ -316,7 +316,7 @@ function buildManagedMcpBlock(input: {
       "",
       `[mcp_servers.${tomlString(managedName)}]`,
       `url = ${tomlString(url)}`,
-      `headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
+      `http_headers = { Authorization = ${tomlString(`Bearer ${gateway.bearerToken}`)} }`,
     );
   });
   lines.push(MANAGED_MCP_BLOCK_END);
@@ -383,7 +383,8 @@ function isResolvedPathInside(candidate: string, root: string): boolean {
  * Recursively copies one skill subtree — rooted at its real directory
  * `containmentRoot` — into `targetDir`, dereferencing symlinks to bytes (so the
  * sandbox receives real file content, not host-relative links) and normalizing
- * every copied regular file to mode `0600`. Created directories get mode `0700`.
+ * regular files to owner-only access (`0700` for executables, `0600` otherwise).
+ * Created directories get mode `0700`.
  *
  * Two containment guards protect the staged upload:
  *
@@ -438,8 +439,9 @@ async function stageContainedSubtree(
       activePath.delete(resolved);
     } else if (entryStat.isFile()) {
       const bytes = await fs.readFile(resolved);
-      await fs.writeFile(entryTarget, bytes, { mode: 0o600 });
-      await fs.chmod(entryTarget, 0o600);
+      const mode = entryStat.mode & 0o111 ? 0o700 : 0o600;
+      await fs.writeFile(entryTarget, bytes, { mode });
+      await fs.chmod(entryTarget, mode);
     }
     // Other types (sockets, devices) are silently skipped.
   }
@@ -448,11 +450,12 @@ async function stageContainedSubtree(
 /**
  * Recursively copies `sourceDir` (a directory allowlist entry — currently only
  * `skills/`) into `targetDir`, dereferencing symlinks to bytes and normalizing
- * every copied regular file to mode `0600`. Created directories get mode `0700`.
+ * regular files to owner-only access (`0700` for executables, `0600` otherwise).
+ * Created directories get mode `0700`.
  *
  * This replaces `fs.cp({ dereference: true })` which preserves source file modes,
  * leaving `0644` documents and `0755` scripts group/other-readable in the staged
- * asset; here all regular files are normalized to `0600` regardless of source mode.
+ * asset; here skill files retain only their executable flag, with owner-only access.
  *
  * `sourceDir`'s *direct* children are the Paperclip-injected skill symlinks that
  * intentionally point into a shared skill store *outside* `CODEX_HOME/skills/`,
@@ -463,7 +466,7 @@ async function stageContainedSubtree(
  * cycles (finding 1). A direct child that resolves to `sourceDir` itself or to
  * an ancestor of it (a degenerate `-> .` / `-> ..` link at the top level) is
  * skipped rather than used as a root, so it can never drag the wider home into
- * the staged skills asset. The `0700` staged directory and per-file `0600` mode
+ * the staged skills asset. The `0700` staged directory and per-file owner-only mode
  * together ensure even externally-sourced skill content is not group/world-readable.
  */
 async function stageDirectorySecure(
@@ -498,8 +501,9 @@ async function stageDirectorySecure(
       await stageContainedSubtree(resolved, entryTarget, resolved, new Set([resolved]));
     } else if (entryStat.isFile()) {
       const bytes = await fs.readFile(resolved);
-      await fs.writeFile(entryTarget, bytes, { mode: 0o600 });
-      await fs.chmod(entryTarget, 0o600);
+      const mode = entryStat.mode & 0o111 ? 0o700 : 0o600;
+      await fs.writeFile(entryTarget, bytes, { mode });
+      await fs.chmod(entryTarget, mode);
     }
     // Other types (sockets, devices) are silently skipped.
   }
@@ -614,6 +618,17 @@ export async function seedManagedCodexHome(
   const sourceHome = resolveSharedCodexHomeDir(env);
   const seedFromShared = path.resolve(sourceHome) !== path.resolve(targetHome);
 
+  // A per-identity credential-store entry is not a seedable home: its
+  // auth.json is the durable, identity-anchored result of a device login,
+  // maintained by the promotion, the vend, and the copy-back under their own
+  // locks. An agent can bind `CODEX_HOME` to an entry through the login's
+  // account-home secret, and this pass runs before every probe and execute —
+  // symlinking the entry to the shared source would silently swap the bound
+  // account for the host login, and an API-key rewrite would destroy the
+  // stored credential outright. The static shared config files still copy
+  // in below, so a bound run gets the same config a per-agent home gets.
+  const credentialStoreEntry = isCodexAuthCachePath(env, targetHome);
+
   await fs.mkdir(targetHome, { recursive: true });
 
   // A regular-file auth.json in the target home is one of two very different
@@ -645,7 +660,7 @@ export async function seedManagedCodexHome(
   // deleting it would silently sign the company out right after a successful
   // device login.
   let keepPromotedAuth = false;
-  if (!apiKey && seedFromShared) {
+  if (!apiKey && seedFromShared && !credentialStoreEntry) {
     const authPath = path.join(targetHome, "auth.json");
     const existing = await fs.lstat(authPath).catch(() => null);
     if (existing && !existing.isSymbolicLink()) {
@@ -713,8 +728,9 @@ export async function seedManagedCodexHome(
   if (seedFromShared) {
     for (const name of SYMLINKED_SHARED_FILES) {
       // The kept promoted credential is authoritative for this home; the shared
-      // symlink would silently swap the account back to the host login.
-      if (name === "auth.json" && keepPromotedAuth) continue;
+      // symlink would silently swap the account back to the host login. A
+      // credential-store entry's auth.json is authoritative unconditionally.
+      if (name === "auth.json" && (keepPromotedAuth || credentialStoreEntry)) continue;
       const source = path.join(sourceHome, name);
       if (!(await pathExists(source))) continue;
       await ensureSymlink(path.join(targetHome, name), source);
@@ -733,11 +749,22 @@ export async function seedManagedCodexHome(
   }
 
   if (apiKey) {
-    await writeApiKeyAuthJson(targetHome, apiKey);
-    await onLog(
-      "stdout",
-      `[paperclip] Wrote API-key auth.json into Codex home "${targetHome}" from configured OPENAI_API_KEY.\n`,
-    );
+    if (credentialStoreEntry) {
+      // Refuse, loudly: overwriting a store entry's subscription credential
+      // with an API-key file would destroy the durable login the entry
+      // exists to hold. The operator combined an account binding with a
+      // configured OPENAI_API_KEY; the binding wins for this home.
+      await onLog(
+        "stdout",
+        `[paperclip] Refusing to write an API-key auth.json into credential-store entry "${targetHome}"; the bound account's stored login stays authoritative.\n`,
+      );
+    } else {
+      await writeApiKeyAuthJson(targetHome, apiKey);
+      await onLog(
+        "stdout",
+        `[paperclip] Wrote API-key auth.json into Codex home "${targetHome}" from configured OPENAI_API_KEY.\n`,
+      );
+    }
   }
 }
 

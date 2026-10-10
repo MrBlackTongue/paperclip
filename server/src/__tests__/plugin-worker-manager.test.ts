@@ -605,12 +605,14 @@ describe("plugin proactive company scope (LOOA-629)", () => {
   }) {
     const companiesGet = overrides?.companiesGet ?? vi.fn(async () => ({ id: "company-1", name: "Co" }));
     const stateGet = overrides?.stateGet ?? vi.fn(async () => ({ value: "ok" }));
+    const listLifecycle = vi.fn(async () => [{ id: "1", companyId: "company-1" }]);
     const hostHandlers = createHostClientHandlers({
       pluginId: "test.plugin",
-      capabilities: ["companies.read", "plugin.state.read"],
+      capabilities: ["companies.read", "plugin.state.read", "events.subscribe"],
       services: {
         companies: { get: companiesGet },
         state: { get: stateGet },
+        events: { listLifecycle },
       } as unknown as HostServices,
     });
     const handle = createPluginWorkerHandle("test.plugin", {
@@ -621,7 +623,7 @@ describe("plugin proactive company scope (LOOA-629)", () => {
       apiVersion: 1,
       hostHandlers,
     });
-    return { handle, companiesGet, stateGet };
+    return { handle, companiesGet, stateGet, listLifecycle };
   }
 
   it("denies a proactive company-scoped call when no company is authorized", async () => {
@@ -635,6 +637,25 @@ describe("plugin proactive company scope (LOOA-629)", () => {
         message: expect.stringContaining("company context is required"),
       });
       expect(companiesGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("admits lifecycle polling only for configured proactive companies", async () => {
+    const { handle, listLifecycle } = makeHandle();
+    const poll = (companyId: string) => handle.call("getData", {
+      params: { mode: "omit", hostMethod: "events.listLifecycle", requestedCompanyId: companyId },
+    } as unknown as HostToWorkerMethods["getData"][0]);
+    try {
+      await handle.start();
+      await expect(poll("company-1")).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      handle.setProactiveCompanyScopes(["company-1"]);
+      expect(await poll("company-1")).toEqual([{ id: "1", companyId: "company-1" }]);
+      await expect(poll("company-2")).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      handle.setProactiveCompanyScopes([]);
+      await expect(poll("company-1")).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      expect(listLifecycle).toHaveBeenCalledTimes(1);
     } finally {
       await handle.stop().catch(() => undefined);
     }
@@ -1636,10 +1657,13 @@ describe("plugin worker manager login pseudo-terminal missing hostRouteId diagno
       const route = await handle.openLoginPtySession(
         ptyOpenInput({
           workerSessionId: "ws-A",
+          emitOnInput: true,
           outputs: [{ chunk: "legacy-output", omitHostRouteId: true }],
         }),
       );
       route.onData((chunk) => chunks.push(chunk));
+      // Legacy notifications require the open reply to bind the worker ID.
+      route.write("emit-scripted-output");
       await vi.waitFor(() => expect(chunks).toContain("legacy-output"));
 
       const warnCalls = vi.mocked(logger.warn).mock.calls.flat().map((arg) => JSON.stringify(arg));
@@ -1661,8 +1685,9 @@ describe("plugin worker manager login pseudo-terminal missing hostRouteId diagno
     try {
       await handle.start();
       const route = await handle.openLoginPtySession(
-        ptyOpenInput({ workerSessionId: "ws-A", exitCode: 0, omitHostRouteIdOnExit: true }),
+        ptyOpenInput({ workerSessionId: "ws-A", exitCode: 0, omitHostRouteIdOnExit: true, emitOnInput: true }),
       );
+      route.write("emit-scripted-exit");
       await expect(route.wait()).resolves.toEqual({ exitCode: 0 });
     } finally {
       await handle.stop().catch(() => undefined);
