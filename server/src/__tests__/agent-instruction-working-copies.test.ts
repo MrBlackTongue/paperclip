@@ -221,6 +221,20 @@ describe("registered run instruction copies", () => {
     expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
   });
 
+  it("preserves the specific low-trust denial in the instruction-save receipt", async () => {
+    const copy = await run();
+    await fs.writeFile(path.join(copy.localRoot, entryFile), "Unauthorized persistent edit");
+    await db.update(agents).set({ permissions: {
+      trustPreset: "low_trust_review",
+      authorizationPolicy: { trustBoundary: { mode: "low_trust_review", companyId, rootIssueId: randomUUID() } },
+    } }).where(eq(agents.id, agentId));
+    const denied = await copies.collectStopped({ companyId, runId: copy.runId });
+    expect(denied?.state).toBe("conflict");
+    expect(denied?.errorMessage).toContain("This low-trust run cannot change persistent agent instructions, including AGENTS.md");
+    expect(denied?.candidateBase64).not.toBeNull();
+    expect(await fs.readFile(path.join(root, entryFile), "utf8")).toBe(initial);
+  });
+
   it("does not import a symlink or confuse a removed entry with an empty file", async () => {
     const linked = await run();
     await fs.unlink(path.join(linked.localRoot, entryFile));
@@ -286,6 +300,10 @@ describe("registered run instruction copies", () => {
     expect((await revisions.readCurrent(target(), board()))?.content).toBe(initial);
     expect((await copies.list(companyId, agentId, board()))[0]).toMatchObject({ state: "pending_collection", content: null });
     await appendHeartbeatRunEvent(db, { ...target(), runId: copy.runId, eventType: "native.local_process_stopped", stream: "system" });
+    // Recovery scheduled a retry while stop authority was missing. Make that
+    // retry due before asking the restarted controller to collect the copy.
+    await db.update(agentInstructionWorkingCopies).set({ nextAttemptAt: new Date(0) })
+      .where(eq(agentInstructionWorkingCopies.runId, copy.runId));
     await copies.recoverStopped();
     expect((await revisions.readCurrent(target(), board()))?.content).toBe("edit before controller restart");
   });

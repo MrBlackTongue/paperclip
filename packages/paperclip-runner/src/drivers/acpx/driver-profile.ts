@@ -1,3 +1,4 @@
+import { resolvePiThinkingLevel, type PiThinkingLevel } from "./pi-thinking.js";
 import type {
   HarnessDriverConfigValidation,
   HarnessDriverDescriptor,
@@ -21,12 +22,13 @@ const ACPX_PERMISSION_MODES = [
   "approve-reads",
   "deny-all",
 ] as const;
-const ACPX_CONFIG_FIELDS = new Set(["agent", "model", "permissionMode"]);
+const ACPX_CONFIG_FIELDS = new Set(["agent", "model", "permissionMode", "piThinkingLevel"]);
 
 export interface ValidatedAcpxDriverConfig extends Record<string, unknown> {
   agent: QualifiedAcpxAgent;
   model: string;
   permissionMode: NativeAcpxPermissionMode;
+  piThinkingLevel?: PiThinkingLevel;
 }
 
 export function acpxCapabilities(
@@ -37,6 +39,7 @@ export function acpxCapabilities(
   const profile = ACPX_CAPABILITY_PROFILES[agent];
   return {
     resume: profile.recovery === "session-load",
+    toolRefreshOnResume: profile.recovery === "session-load" && profile.toolRefreshOnResume === true,
     typedEvents: true,
     typedEventFamilies: providerFamilyCapabilities({
       plan: profile.plans === "semantic-only" ? "unsupported" : "available",
@@ -128,10 +131,13 @@ export function validateAcpxDriverConfig(
     );
   }
 
+  let piThinkingLevel: PiThinkingLevel | undefined;
+  try { piThinkingLevel = resolvePiThinkingLevel(agent, config.piThinkingLevel); } catch (error) { return invalid("piThinkingLevel", "invalid_pi_thinking_level", safeErrorMessage(error)); }
   const validated: ValidatedAcpxDriverConfig = {
     agent,
     model,
     permissionMode,
+    ...(piThinkingLevel === undefined ? {} : { piThinkingLevel }),
   };
   return { ok: true, config: validated, issues: [] };
 }

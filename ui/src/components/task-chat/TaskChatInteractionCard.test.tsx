@@ -302,6 +302,40 @@ describe("TaskChatInteractionCard", () => {
     );
   });
 
+  it.each([createRequestConfirmation(), pendingRequestCheckboxConfirmationInteraction])(
+    "enables $kind acceptance when preparation clears on the same mounted card",
+    async (fixture) => {
+      const onAcceptInteraction = vi.fn();
+      const onRejectInteraction = vi.fn();
+      const render = (preparing: boolean) => flushSync(() => root.render(
+        <TooltipProvider><ThemeProvider>
+          <TaskChatInteractionCard
+            item={interactionItem({ ...fixture, acceptanceBlocker: preparing ? "workspace_sync_pending" : undefined })}
+            presentation="takeover"
+            onAcceptInteraction={onAcceptInteraction}
+            onRejectInteraction={onRejectInteraction}
+          />
+        </ThemeProvider></TooltipProvider>,
+      ));
+      const approve = () => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent === (fixture.payload.acceptLabel ?? "Approve"),
+      )!;
+      render(true);
+      expect(container.querySelector('[role="status"]')?.textContent).toContain("Preparing approval…");
+      expect(approve().disabled).toBe(true);
+      await act(async () => approve().click());
+      expect(onAcceptInteraction).not.toHaveBeenCalled();
+      expect([...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent === (fixture.payload.rejectLabel ?? "Reject"),
+      )?.disabled).toBe(false);
+      render(false);
+      expect(container.textContent).not.toContain("Preparing approval…");
+      expect(approve().disabled).toBe(false);
+      await act(async () => approve().click());
+      expect(onAcceptInteraction).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("puts the primary CTA at the right edge of the compact action row", () => {
     flushSync(() => {
       root.render(
@@ -681,6 +715,38 @@ describe("TaskChatInteractionCard", () => {
         otherText: "3",
       },
     ]);
+  });
+
+  it.each(["canonical_text", "canonical_custom", "legacy_custom"])("preserves the %s answer mapping", async (mode) => {
+    const submit = vi.fn();
+    const interaction = structuredClone(pendingAskUserQuestionsInteraction);
+    interaction.payload.questions = [{
+      id: "draft", prompt: "Edit", selectionMode: "single", required: true,
+      options: [{ id: "preset", label: "Preset" }, { id: "other", label: "Custom answer", freeText: true }],
+    }];
+    interaction.payload.questionSet = mode === "legacy_custom" ? undefined : {
+      schema: "paperclip.question_set.v1",
+      questions: [mode === "canonical_text"
+        ? { id: "draft", prompt: "Edit", required: true, answerMode: "text", initialText: "Provider draft" }
+        : { id: "draft", prompt: "Edit", required: true, answerMode: "single_select", options: [{ id: "preset", label: "Preset" }], customAnswer: { enabled: true, label: "Custom answer" } }],
+    };
+    await act(async () => root.render(
+      <TooltipProvider><ThemeProvider>
+        <TaskChatInteractionCard item={interactionItem(interaction)} presentation="takeover" onSubmitInteractionAnswers={submit} />
+      </ThemeProvider></TooltipProvider>,
+    ));
+    if (mode !== "canonical_text") {
+      await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.textContent?.includes("Custom answer"))!.click());
+    }
+    const edited = "\n  Operator 漢字 edit\nLiteral \\n stays literal.  \n";
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(container.querySelector("textarea")!, edited);
+      container.querySelector("textarea")!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.textContent?.trim() === "Send answers" || button.textContent?.trim() === "Submit answers")!.click());
+    expect(submit).toHaveBeenCalledExactlyOnceWith(interaction, [{
+      questionId: "draft", optionIds: [], otherText: mode === "canonical_text" ? edited : edited.trim(),
+    }]);
   });
 
   it("paginates item verdicts instead of expanding the whole review set", async () => {
