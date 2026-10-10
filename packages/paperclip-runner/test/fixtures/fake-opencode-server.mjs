@@ -258,7 +258,7 @@ const server = createServer(async (request, response) => {
   if (request.headers.authorization !== expectedAuth)
     return json(response, 401, { error: "unauthorized" });
   if (request.url === "/global/health")
-    return json(response, 200, { healthy: true, version: "1.18.32" });
+    return json(response, 200, { healthy: true, version: "1.18.34" });
   if (request.url === "/event") {
     eventConnections += 1;
     response.writeHead(200, {
@@ -619,6 +619,15 @@ const server = createServer(async (request, response) => {
             },
           },
         });
+        if (String(parsedPrompt.message ?? parsedPrompt.task?.prompt ?? "").includes("invalid-tool-feedback")) {
+          for (const [status, state] of [
+            ["pending", {}], ["running", { title: "Checking tool name" }],
+            ["error", { error: "Tool not found: fixture_missing" }],
+          ]) emit({ type: "message.part.updated", id: `event-invalid-${status}`, properties: {
+            sessionID: session.id, part: { id: "part-invalid", messageID: "message-assistant",
+              type: "tool", tool: "invalid", callID: "call-invalid", state: { status, ...state } },
+          } });
+        }
         emit({
           type: "message.part.updated",
           id: "event-patch",

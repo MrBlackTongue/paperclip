@@ -1,3 +1,4 @@
+import type { SQL } from "drizzle-orm";
 import { createWorkspaceGitInspectionCache } from "./workspace-git-inspection-cache.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1834,9 +1835,11 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       issueId?: string;
       status?: string;
       reuseEligible?: boolean;
+      readCondition?: SQL<boolean>;
     },
   ) {
     const conditions = [eq(executionWorkspaces.companyId, companyId)];
+    if (filters?.readCondition) conditions.push(filters.readCondition);
     if (filters?.projectId) conditions.push(eq(executionWorkspaces.projectId, filters.projectId));
     if (filters?.projectWorkspaceId) {
       conditions.push(eq(executionWorkspaces.projectWorkspaceId, filters.projectWorkspaceId));
@@ -1871,8 +1874,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     listOverview: async (
       companyId: string,
       filters: WorkspaceOverviewQuery,
+      readCondition?: SQL<boolean>,
     ): Promise<WorkspaceOverviewResponse> => {
       const conditions = buildOverviewConditions(companyId, filters);
+      if (readCondition) conditions.push(readCondition);
       const whereClause = and(...conditions);
 
       const [totalRow, rows] = await Promise.all([
@@ -2083,6 +2088,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       issueId?: string;
       status?: string;
       reuseEligible?: boolean;
+      readCondition?: SQL<boolean>;
     }) => {
       const conditions = buildListConditions(companyId, filters);
       const rows = await db
@@ -2109,6 +2115,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       issueId?: string;
       status?: string;
       reuseEligible?: boolean;
+      readCondition?: SQL<boolean>;
     }) => {
       const conditions = buildListConditions(companyId, filters);
       const rows = await db
