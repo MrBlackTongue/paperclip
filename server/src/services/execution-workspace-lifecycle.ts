@@ -70,15 +70,19 @@ async function archiveSharedSession(
     .then((rows) => rows[0] ?? null);
   if (!archived) return false;
 
-  await db
-    .update(issues)
-    .set({ executionWorkspaceId: null, updatedAt: closedAt })
-    .where(
-      and(
-        eq(issues.companyId, input.companyId),
-        eq(issues.executionWorkspaceId, input.workspaceId),
-      ),
-    );
+  // A terminal issue keeps its link: it records where the work ran. Only a
+  // superseded session is unlinked, because a newer session replaced it.
+  if (input.source !== "terminal_issue") {
+    await db
+      .update(issues)
+      .set({ executionWorkspaceId: null, updatedAt: closedAt })
+      .where(
+        and(
+          eq(issues.companyId, input.companyId),
+          eq(issues.executionWorkspaceId, input.workspaceId),
+        ),
+      );
+  }
 
   const warnings: string[] = [];
   try {

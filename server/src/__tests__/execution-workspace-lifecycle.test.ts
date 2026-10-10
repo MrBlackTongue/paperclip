@@ -235,7 +235,7 @@ describeEmbeddedPostgres("shared execution workspace session lifecycle", () => {
       .from(issues)
       .where(eq(issues.id, fixture.issueIds[0]))
       .then((rows) => rows[0]);
-    expect(issue.executionWorkspaceId).toBeNull();
+    expect(issue.executionWorkspaceId).toBe(fixture.executionWorkspaceId);
   }, 20_000);
 
   it("does nothing while the issue is not terminal", async () => {
