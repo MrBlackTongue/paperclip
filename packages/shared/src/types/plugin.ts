@@ -163,6 +163,31 @@ export interface SandboxProviderCapabilities {
    * the output-file poll path.
    */
   incrementalSessionOutput?: boolean;
+  /**
+   * Provider can run file transfers into and out of the sandbox in parallel, in
+   * both directions. This is an opt-in behavioral guarantee. An omitted key
+   * denies the capability, so the host keeps the serial transfer path. The host
+   * resolves the capability `true` only when the provider declares this key
+   * `true` and the live worker verifies both sync verbs (`environmentSyncIn` and
+   * `environmentSyncOut`). A provider that verifies only one verb resolves
+   * `false`.
+   */
+  concurrentSyncOperations?: boolean;
+  /**
+   * Provider opens one persistent, bidirectional duplex channel that carries the
+   * command stream, in place of the file transport of the callback bridge. This
+   * is an opt-in behavioral guarantee, not a worker-method property: a provider
+   * that keeps persistent sessions and runs independent control commands still
+   * does not carry a framed duplex stream unless it declares this key. An omitted
+   * key denies the capability, so the provider keeps the file bridge. Only a
+   * provider that declares this key `true` and whose worker verifies the duplex
+   * open method selects the duplex channel path.
+   *
+   * HTTP/2 is the preferred transport. `queue_v1` is the soft-deprecated fallback.
+   */
+  duplexCommandStream?: boolean;
+  /** Provider can expose runnerd through a private authenticated WebSocket ingress. */
+  runnerWebSocketIngress?: boolean;
 }
 
 export interface PluginEnvironmentDriverDeclaration {
@@ -180,6 +205,13 @@ export interface PluginEnvironmentDriverDeclaration {
   displayName: string;
   /** Optional description for operator-facing docs or UI affordances. */
   description?: string;
+  /**
+   * Default provider budget for a fresh lease acquisition, in milliseconds.
+   * The host adds RPC overhead. A valid explicit config.timeoutMs overrides
+   * this default; bridgeRequestTimeoutMs can extend the resulting budget.
+   * Omit to retain the worker's normal RPC timeout. This is not lease lifetime.
+   */
+  defaultAcquireTimeoutMs?: number;
   /**
    * Sandbox providers must opt in before the host retains and resumes provider
    * leases across runs. Providers without this flag keep per-run acquire/release
@@ -216,10 +248,19 @@ export interface PluginEnvironmentDriverDeclaration {
   /** Provider supports best-effort deletion/cleanup of captured templates. */
   supportsTemplateDelete?: boolean;
   /**
-   * Provider can host the Claude setup-token login on a real pseudo-terminal.
-   * Only a provider with this flag exposes the setup-token pseudo-terminal
-   * methods. The setup-token login server and the login UI both gate on this
-   * flag, so a provider without it never starts a login.
+   * Provider can host an interactive login on a real pseudo-terminal. Only a
+   * provider with this flag exposes the login pseudo-terminal methods. The login
+   * server and the login UI both gate on this flag, so a provider without it
+   * never starts a login.
+   */
+  supportsLoginPty?: boolean;
+  /**
+   * Deprecated alias for `supportsLoginPty`. It exists only so an external
+   * plugin manifest that declares the old name still loads. The manifest
+   * validator canonicalizes it onto `supportsLoginPty` and drops it. Do not read
+   * this field; read `supportsLoginPty`.
+   *
+   * @deprecated Use `supportsLoginPty`.
    */
   supportsSetupTokenLogin?: boolean;
   /** JSON Schema describing the driver's provider-specific configuration. */
@@ -646,6 +687,10 @@ export interface PaperclipPluginManifestV1 {
   minimumPaperclipVersion?: PluginMinimumHostVersion;
   /** Capabilities this plugin requires from the host. Enforced at runtime. */
   capabilities: PluginCapability[];
+  /** Required participant in agent preparation, stop, resume, and cleanup. */
+  agentLifecycle?: true;
+  /** Opt into the native pooled-connection catalog, setup, and management UI. */
+  aiConnectionRouter?: { name: string; description: string };
   /** Entrypoint paths relative to the package root. */
   entrypoints: {
     /** Path to the worker entrypoint (required). */

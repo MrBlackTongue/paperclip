@@ -1,3 +1,5 @@
+import { canActorReadWorkspaceOperation } from "../services/heartbeat-run-privacy.js";
+import { canActorReadExecutionWorkspace, executionWorkspaceReadSqlCondition } from "../services/authorization.js";
 import { spawn } from "node:child_process";
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -15,9 +17,11 @@ import {
 } from "@paperclipai/shared";
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import {
+  baseWorkspaceDeclaresInstanceConfig,
   resolveCanonicalWorktreeSeedSource,
   type CanonicalWorktreeSeedSource,
 } from "@paperclipai/shared/worktree-seed-source";
+import { resolvePaperclipConfigPath } from "../paths.js";
 import { validate } from "../middleware/validate.js";
 import {
   accessService,
@@ -71,6 +75,16 @@ function isReadableFile(filePath: string) {
   }
 }
 
+/**
+ * The control plane's own instance config, named as the seed source only when the base
+ * project workspace is a plain checkout carrying no instance config of its own. A base
+ * workspace that has one stays authoritative, so an operator's mismatched source is
+ * still rejected.
+ */
+function resolveFallbackSeedSourceConfigPath(baseWorkspaceCwd: string): string | null {
+  return baseWorkspaceDeclaresInstanceConfig(baseWorkspaceCwd) ? null : resolvePaperclipConfigPath();
+}
+
 export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: PluginWorkerManager } = {}) {
   const router = Router();
   const svc = executionWorkspaceService(db);
@@ -83,6 +97,12 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
   const environmentRuntime = environmentRuntimeService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
+
+  async function assertWorkspacePrivacy(req: Request, res: Response, id: string) {
+    if (await canActorReadExecutionWorkspace(db, req.actor, id)) return true;
+    res.status(404).json({ error: "Execution workspace not found" });
+    return false;
+  }
 
   async function assertExecutionWorkspaceReadAllowed(req: Request, res: Response, companyId: string) {
     const decision = await access.decide({
@@ -111,6 +131,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     assertCompanyAccess(req, companyId);
     if (!(await assertExecutionWorkspaceReadAllowed(req, res, companyId))) return;
     const filters = {
+      readCondition: await executionWorkspaceReadSqlCondition(db, req.actor),
       projectId: req.query.projectId as string | undefined,
       projectWorkspaceId: req.query.projectWorkspaceId as string | undefined,
       issueId: req.query.issueId as string | undefined,
@@ -137,7 +158,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
       return;
     }
 
-    const overview = await svc.listOverview(companyId, parsed.data);
+    const overview = await svc.listOverview(companyId, parsed.data, await executionWorkspaceReadSqlCondition(db, req.actor));
     res.json(overview);
   });
 
@@ -145,6 +166,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     const id = req.params.id as string;
     const workspace = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!workspace) return;
+    if (!(await assertWorkspacePrivacy(req, res, workspace.id))) return;
     if (!(await assertExecutionWorkspaceReadAllowed(req, res, workspace.companyId))) return;
     res.json(workspace);
   });
@@ -153,6 +175,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     const id = req.params.id as string;
     const workspace = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!workspace) return;
+    if (!(await assertWorkspacePrivacy(req, res, workspace.id))) return;
     if (!(await assertExecutionWorkspaceReadAllowed(req, res, workspace.companyId))) return;
     const readiness = await svc.getCloseReadiness(id);
     if (!readiness) {
@@ -175,6 +198,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     assertBoard(req);
     const workspace = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!workspace) return;
+    if (!(await assertWorkspacePrivacy(req, res, workspace.id))) return;
     // Opening a workspace board is a runtime-control-grade action: it hands the
     // caller an authenticated session inside the cloned instance.
     if (!(await assertRuntimeManageAllowed(req, res, workspace.companyId))) return;
@@ -247,9 +271,14 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     const id = req.params.id as string;
     const workspace = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!workspace) return;
+    if (!(await assertWorkspacePrivacy(req, res, workspace.id))) return;
     if (!(await assertExecutionWorkspaceReadAllowed(req, res, workspace.companyId))) return;
     const operations = await workspaceOperationsSvc.listForExecutionWorkspace(id);
-    res.json(operations);
+    const visibleOperations = [];
+    for (const operation of operations) {
+      if (await canActorReadWorkspaceOperation(db, access, req.actor, operation)) visibleOperations.push(operation);
+    }
+    res.json(visibleOperations);
   });
 
   async function handleExecutionWorkspaceRuntimeCommand(req: Request, res: Response) {
@@ -262,6 +291,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
 
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!existing) return;
+    if (!(await assertWorkspacePrivacy(req, res, existing.id))) return;
     if (!(await assertRuntimeManageAllowed(req, res, existing.companyId))) return;
 
     const authorization = await assertCanManageExecutionWorkspaceRuntimeServices(db, req, {
@@ -395,6 +425,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
         }
         repairSeedSource = resolveCanonicalWorktreeSeedSource({
           registeredBaseWorkspaceCwd: projectWorkspace.cwd,
+          explicitSourceConfigPath: resolveFallbackSeedSourceConfigPath(projectWorkspace.cwd),
           targetConfigPath: path.join(workspaceCwd, ".paperclip", "config.json"),
           expectedTargetInstanceId,
           manifestSource: manifest.source,
@@ -782,6 +813,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
             }
             resolveCanonicalWorktreeSeedSource({
               registeredBaseWorkspaceCwd: baseWorkspaceCwd,
+              explicitSourceConfigPath: resolveFallbackSeedSourceConfigPath(baseWorkspaceCwd),
               targetConfigPath: path.join(workspaceCwd, ".paperclip", "config.json"),
               expectedTargetInstanceId: repairSeedSource.targetInstanceId,
               manifestSource: manifest.source as { configPath?: unknown; instanceId?: unknown } | undefined,
@@ -881,6 +913,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
               onLog,
               recorder,
               serviceIndex: selectedServiceIndex,
+              runtimeServiceId: selectedRuntimeServiceId,
             });
           } catch (error) {
             // A failed start must leave the workspace stopped and retryable rather than
@@ -1035,6 +1068,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!existing) return;
+    if (!(await assertWorkspacePrivacy(req, res, existing.id))) return;
     assertBoard(req);
     if (!(await assertRuntimeManageAllowed(req, res, existing.companyId))) return;
 
@@ -1124,6 +1158,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Execution workspace not found");
     if (!existing) return;
+    if (!(await assertWorkspacePrivacy(req, res, existing.id))) return;
     if (!(await assertRuntimeManageAllowed(req, res, existing.companyId))) return;
     assertNoAgentHostWorkspaceCommandMutation(
       req,

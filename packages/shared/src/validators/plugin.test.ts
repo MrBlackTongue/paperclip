@@ -33,6 +33,17 @@ describe("plugin capability constants", () => {
 });
 
 describe("plugin manifest validators", () => {
+  it("requires authority for required agent lifecycle participants", () => {
+    const manifest = { id: "example.lifecycle", apiVersion: 1, version: "0.1.0", displayName: "Lifecycle", description: "Lifecycle tests", author: "Tests", categories: ["automation"], entrypoints: { worker: "worker.js" }, agentLifecycle: true };
+    expect(pluginManifestV1Schema.safeParse({ ...manifest, capabilities: ["agents.read"] }).success).toBe(false);
+    expect(pluginManifestV1Schema.parse({ ...manifest, capabilities: ["agents.lifecycle.manage"] }).agentLifecycle).toBe(true);
+  });
+
+  it("requires routing authority for native pooled connector declarations without a custom UI bundle", () => {
+    const manifest = { id: "example.pool", apiVersion: 1, version: "0.1.0", displayName: "Pool", description: "Pool", author: "Tests", categories: ["connector"], entrypoints: { worker: "worker.js" }, aiConnectionRouter: { name: "AI connection pool", description: "Use saved connections" } };
+    expect(pluginManifestV1Schema.safeParse({ ...manifest, capabilities: ["ui.page.register"] }).success).toBe(false);
+    expect(pluginManifestV1Schema.parse({ ...manifest, capabilities: ["ai.connections.route"] }).aiConnectionRouter).toEqual(manifest.aiConnectionRouter);
+  });
   it("accepts existing-style plugins that do not request access or authorization capabilities", () => {
     const parsed = pluginManifestV1Schema.parse({
       id: "paperclip.compat-dashboard",
@@ -276,6 +287,24 @@ describe("plugin UI slot validators", () => {
 });
 
 describe("sandbox provider capability declaration validators", () => {
+  it("preserves a declared acquisition budget and keeps it optional", () => {
+    const parsed = pluginManifestV1Schema.parse(
+      buildSandboxProviderManifest({ defaultAcquireTimeoutMs: 300_000 }),
+    );
+    expect(parsed.environmentDrivers?.[0]?.defaultAcquireTimeoutMs).toBe(300_000);
+    const legacy = pluginManifestV1Schema.parse(buildSandboxProviderManifest({}));
+    expect(legacy.environmentDrivers?.[0]?.defaultAcquireTimeoutMs).toBeUndefined();
+  });
+
+  it.each([0, -1, 1.5, Infinity, NaN, "300000", 86_400_001])(
+    "rejects an invalid acquisition budget: %s",
+    (defaultAcquireTimeoutMs) => {
+      expect(pluginManifestV1Schema.safeParse(
+        buildSandboxProviderManifest({ defaultAcquireTimeoutMs }),
+      ).success).toBe(false);
+    },
+  );
+
   it("test_manifest_accepts_sandbox_capabilities_and_rejects_unknown_capability_keys", () => {
     const parsed = pluginManifestV1Schema.parse(
       buildSandboxProviderManifest({
@@ -313,18 +342,29 @@ describe("sandbox provider capability declaration validators", () => {
     expect(rejected.success).toBe(false);
   });
 
-  it("test_removed_concurrency_capabilities_are_rejected_as_unknown_keys", () => {
-    // The concurrency flags left the public contract because no runtime path
-    // enforced them. The strict schema now rejects them, so a manifest cannot
-    // declare a capability the host does not honor.
-    for (const key of ["concurrentSyncAndExec", "concurrentSyncOperations"]) {
-      const rejected = pluginManifestV1Schema.safeParse(
-        buildSandboxProviderManifest({
-          sandboxCapabilities: { [key]: true },
-        }),
-      );
-      expect(rejected.success).toBe(false);
-    }
+  it("test_manifest_accepts_concurrent_sync_operations_capability", () => {
+    // A provider opts in to parallel bidirectional file sync with this key. The
+    // strict schema accepts it and keeps the declared value.
+    const parsed = pluginManifestV1Schema.parse(
+      buildSandboxProviderManifest({
+        sandboxCapabilities: { concurrentSyncOperations: true },
+      }),
+    );
+
+    expect(parsed.environmentDrivers?.[0]?.sandboxCapabilities).toEqual({
+      concurrentSyncOperations: true,
+    });
+  });
+
+  it("test_manifest_rejects_unknown_sync_concurrency_capability_key", () => {
+    // A neighboring but unknown concurrency key must fail validation, not drop
+    // silently. The strict schema rejects a capability the host does not honor.
+    const rejected = pluginManifestV1Schema.safeParse(
+      buildSandboxProviderManifest({
+        sandboxCapabilities: { concurrentSyncAndExec: true },
+      }),
+    );
+    expect(rejected.success).toBe(false);
   });
 
   it("test_supports_reusable_leases_compat_maps_to_reusable_leases", () => {
@@ -348,5 +388,66 @@ describe("sandbox provider capability declaration validators", () => {
 
     // The nested declaration wins over the legacy compat flag when both exist.
     expect(resolveDeclaredSandboxCapabilities(driver!).reusableLeases).toBe(false);
+  });
+});
+
+describe("login pty transport capability and legacy alias", () => {
+  it("test_login_pty_new_field_parses_and_carries_the_flag", () => {
+    const parsed = pluginManifestV1Schema.parse(
+      buildSandboxProviderManifest({ supportsLoginPty: true }),
+    );
+
+    expect(parsed.environmentDrivers?.[0]?.supportsLoginPty).toBe(true);
+  });
+
+  it("test_legacy_alias_only_canonicalizes_onto_login_pty", () => {
+    const parsed = pluginManifestV1Schema.parse(
+      buildSandboxProviderManifest({ supportsSetupTokenLogin: true }),
+    );
+    const driver = parsed.environmentDrivers?.[0];
+
+    // The validator maps the deprecated alias onto the canonical field at parse
+    // time, and it drops the alias so a downstream reader cannot read the old
+    // name.
+    expect(driver?.supportsLoginPty).toBe(true);
+    expect(driver).not.toHaveProperty("supportsSetupTokenLogin");
+  });
+
+  it("test_conflicting_alias_and_new_field_reject", () => {
+    const rejected = pluginManifestV1Schema.safeParse(
+      buildSandboxProviderManifest({
+        supportsLoginPty: true,
+        supportsSetupTokenLogin: false,
+      }),
+    );
+
+    expect(rejected.success).toBe(false);
+  });
+
+  it("test_matching_alias_and_new_field_pass", () => {
+    const parsed = pluginManifestV1Schema.parse(
+      buildSandboxProviderManifest({
+        supportsLoginPty: true,
+        supportsSetupTokenLogin: true,
+      }),
+    );
+
+    expect(parsed.environmentDrivers?.[0]?.supportsLoginPty).toBe(true);
+  });
+
+  it("test_unknown_login_field_misspelling_rejects", () => {
+    const rejected = pluginManifestV1Schema.safeParse(
+      buildSandboxProviderManifest({ supportsLoginPTY: true }),
+    );
+
+    expect(rejected.success).toBe(false);
+  });
+
+  it("test_login_pty_accepts_literal_booleans_only", () => {
+    const rejected = pluginManifestV1Schema.safeParse(
+      buildSandboxProviderManifest({ supportsLoginPty: "true" }),
+    );
+
+    expect(rejected.success).toBe(false);
   });
 });
