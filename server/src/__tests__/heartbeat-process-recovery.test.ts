@@ -2372,6 +2372,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         triggerDetail: "system",
         status: "failed",
         errorCode,
+        // The denial is recorded before the provider starts. A denial after
+        // provider work started is held for operator reconciliation instead.
+        resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
         contextSnapshot: {
           issueId,
           taskId: issueId,
