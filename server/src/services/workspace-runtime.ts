@@ -4251,6 +4251,7 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
   workspace: {
     id: string;
     companyId: string;
+    mode?: string;
     cwd: string | null;
     providerType: string;
     providerRef: string | null;
@@ -4275,6 +4276,14 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
   runCleanupCommands?: boolean;
   forceWorktreeRemoval?: boolean;
 }) {
+  if (input.workspace.mode === "shared_workspace") {
+    return {
+      cleanedPath: null,
+      cleaned: true,
+      warnings: [],
+    };
+  }
+
   if (input.workspace.providerType === "plugin") throw new Error("Managed workspace cleanup requires its storage plugin");
   const warnings: string[] = [];
   const workspacePath = input.workspace.providerRef ?? input.workspace.cwd;
