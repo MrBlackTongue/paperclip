@@ -1,3 +1,4 @@
+import { assertWatchdogServiceRequest } from "./watchdog-service-request.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull, sql } from "drizzle-orm";
@@ -35,6 +36,7 @@ export {
   isTransientDbConnectionError,
   retryIdempotentDatabaseOperation as retryOnTransientDbConnectionError,
 } from "../database-retry.js";
+import { assertFixedProcessKeyRequest } from "./fixed-process-key.js";
 
 import { syncCloudTenantWrites } from "./cloud-tenant-sync.js";
 import { resolveOwnerInstanceAdmin } from "../services/cloud-tenant-authority.js";
@@ -459,6 +461,9 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         onBehalfOfMemberships,
         source: "agent_jwt",
       };
+      if (Object.prototype.hasOwnProperty.call(agentRecord.adapterConfig ?? {}, "watchdogService")) {
+        await assertWatchdogServiceRequest(db, req);
+      }
       next();
       return;
     }
@@ -490,6 +495,8 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       next(unauthorized("Agent is pending approval and cannot authenticate"));
       return;
     }
+
+    assertFixedProcessKeyRequest(agentRecord, req);
 
     const responsibleUserId = normalizeOptionalString(key.responsibleUserId);
     if (!responsibleUserId) {
