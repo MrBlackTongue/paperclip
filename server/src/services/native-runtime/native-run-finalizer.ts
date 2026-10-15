@@ -1219,10 +1219,20 @@ export async function finalizeNativeRun(input: {
   const envelope = record(resultRow.resultJson);
   const result = record(envelope.result);
   const terminal = record(envelope.terminal);
-  const terminalState = terminal.runTerminalState;
-  if (!["succeeded", "failed", "cancelled"].includes(String(terminalState))) {
+  const reportedTerminalState = terminal.runTerminalState;
+  if (!["succeeded", "failed", "cancelled"].includes(String(reportedTerminalState))) {
     throw new Error("native_finalization_invalid");
   }
+  // A responsible-user denial recorded during the run fails it closed before
+  // any status or continuation effect is planned: a successful result must not
+  // schedule another wake under the same unresolved responsible user.
+  const responsibleUserDenied = normalizeResponsibleUserDenialCode(
+    await input.db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.errorCode),
+  ) !== null;
+  const terminalState = responsibleUserDenied && reportedTerminalState === "succeeded"
+    ? "failed"
+    : reportedTerminalState;
 
   await input.db
     .update(nativeRunFinalizations)
@@ -1400,6 +1410,7 @@ export async function finalizeNativeRun(input: {
       providerModelRejected: providerFailure?.errorCode === "native_provider_model_rejected" && ownsProviderFailureDecision,
       providerOverloaded: providerFailure?.errorCode === "native_provider_overloaded" && ownsProviderFailureDecision,
       providerFailureSuperseded: providerFailure?.errorCode === "native_provider_overloaded" && !ownsProviderFailureDecision,
+      responsibleUserDenied,
       failureRetryCount: executionFailureRetryCount(run),
       ...(reviewContext ? { nativeReviewOutcome: nativeReview
         ? nativeReview.interaction.status === "pending" ? "pending" as const : "resolved" as const
