@@ -2934,6 +2934,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .resolves.toMatchObject({ phase: "committed" });
       expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0])
         .toMatchObject({ status: "failed", errorCode, nativePhase: "committed" });
+      // The denial stops the run before any continuation wake is planned.
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, f.agentId)))
+        .filter((wake) => wake.status === "queued")).toHaveLength(0);
       // A later replay of the same committed result keeps the denial.
       await finalizeNativeRun({ db, runId: f.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
       expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0])
