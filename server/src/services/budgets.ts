@@ -53,6 +53,12 @@ type ScopeRecord = {
   budgetHeld: boolean;
 };
 
+/**
+ * Why an invocation is blocked. `company_paused` covers every company pause,
+ * operator or budget; every other block is `budget_exhausted`.
+ */
+export type InvocationBlockCause = "company_paused" | "budget_exhausted";
+
 type PolicyRow = typeof budgetPolicies.$inferSelect;
 type IncidentRow = typeof budgetIncidents.$inferSelect;
 
@@ -215,11 +221,12 @@ async function readAdmissionScopes(db: Db, companyId: string, agentId: string | 
 }
 
 function scopePauseBlock(scopeType: BudgetScopeType, scopeId: string, scope: ScopeRecord, hasPolicies: boolean) {
+  const cause: InvocationBlockCause = scopeType === "company" && scope.paused ? "company_paused" : "budget_exhausted";
   if (scopeType !== "agent" && scope.paused && scope.pauseReason !== "budget") {
-    return { scopeType, scopeId, scopeName: scope.name, reason: `${scopeType === "company" ? "Company" : "Project"} is paused and cannot start new work.` };
+    return { scopeType, scopeId, scopeName: scope.name, cause, reason: `${scopeType === "company" ? "Company" : "Project"} is paused and cannot start new work.` };
   }
   if (scope.paused && scope.pauseReason === "budget" && !hasPolicies) {
-    return { scopeType, scopeId, scopeName: scope.name, reason: "Budget pause requires a policy or an explicit operator resume." };
+    return { scopeType, scopeId, scopeName: scope.name, cause, reason: "Budget pause requires a policy or an explicit operator resume." };
   }
   return null;
 }
@@ -686,6 +693,12 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     prepared?: { scope: ScopeRecord; policies: PolicyRow[]; observations: ObservedSpend[] }) {
     const scope = prepared?.scope ?? await resolveScopeRecord(db, scopeType, scopeId);
     if (scope.companyId !== companyId) throw notFound("Budget scope not found");
+    // A paused company is a stop of the whole company, and the pause can come
+    // from an operator as well as from a budget hard-stop. The cause is taken
+    // from this read, so callers never read the company again to tell the two
+    // apart: a second read can observe a later resume and turn a pause into a
+    // false budget verdict.
+    const cause: InvocationBlockCause = scopeType === "company" && scope.paused ? "company_paused" : "budget_exhausted";
     const policies = prepared?.policies ?? await db.select().from(budgetPolicies).where(and(
       eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, scopeType), eq(budgetPolicies.scopeId, scopeId),
     ));
@@ -698,12 +711,12 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         await pauseAndCancelScopeForBudget(policy, !scope.budgetHeld);
         const title = scopeType === "company" ? "Company" : scopeType === "agent" ? "Agent" : "Project";
         if (observed.pendingRunCount > 0) {
-          return { scopeType, scopeId, scopeName: scope.name, reason: `${title} cannot start work while completed runs await accounting.` };
+          return { scopeType, scopeId, scopeName: scope.name, cause, reason: `${title} cannot start work while completed runs await accounting.` };
         }
         if (unpricedUsageBlocks(policy, observed)) {
-          return { scopeType, scopeId, scopeName: scope.name, reason: `${title} cannot start work because recorded usage has no reliable price.` };
+          return { scopeType, scopeId, scopeName: scope.name, cause, reason: `${title} cannot start work because recorded usage has no reliable price.` };
         }
-        return { scopeType, scopeId, scopeName: scope.name, reason: scopeType === "project"
+        return { scopeType, scopeId, scopeName: scope.name, cause, reason: scopeType === "project"
           ? "Project cannot start work because its budget hard-stop is still exceeded."
           : `${title} is paused because its budget hard-stop was reached.` };
       }
@@ -720,7 +733,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     const pauseBlock = scopePauseBlock(scopeType, scopeId, scope, policies.length > 0);
     if (pauseBlock) return pauseBlock;
     if (scope.budgetHeld && policies[0]) await resumeScopeFromBudget(policies[0]);
-    if (recoveringPolicy) return { scopeType, scopeId, scopeName: scope.name,
+    if (recoveringPolicy) return { scopeType, scopeId, scopeName: scope.name, cause,
       reason: "New work must wait while a native run recovers its unfinished accounting." };
     return null;
   }
