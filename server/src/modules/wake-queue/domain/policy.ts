@@ -223,6 +223,8 @@ export type ReleaseRecoveryImmediateFacts = {
   hasExplicitBlockerPath: boolean;
   isWorkspaceValidationFailedRun: boolean;
   isConfigurationIncompleteFailedRun: boolean;
+  /** The run failed because its responsible user can no longer authorize it. A retry repeats the denial. */
+  isResponsibleUserDenialRun?: boolean;
   /** didAutomaticRecoveryFail(run, expectedRetryReason) for the issue's own status branch. */
   automaticRecoveryAlreadyFailed: boolean;
   /** Exact admitted-chat lineage or a non-retryable failure forbids generic continuation. */
@@ -241,6 +243,7 @@ export type ReleaseRecoveryBlockedNoticeKind =
   | "workspace_validation"
   | "configuration_incomplete"
   | "execution_review_participant"
+  | "responsible_user_denial"
   | "immediate_execution_path";
 
 export type ReleaseRecoveryDecision =
@@ -416,13 +419,16 @@ export function decideReleaseRecovery(facts: ReleaseRecoveryFacts): ReleaseRecov
     !shared.recoveryAgentPresent ||
     immediate.isWorkspaceValidationFailedRun ||
     immediate.isConfigurationIncompleteFailedRun ||
+    immediate.isResponsibleUserDenialRun === true ||
     immediate.automaticRecoveryAlreadyFailed;
   if (shouldBlockImmediately) {
     const notice: ReleaseRecoveryBlockedNoticeKind = immediate.isWorkspaceValidationFailedRun
       ? "workspace_validation"
       : immediate.isConfigurationIncompleteFailedRun
         ? "configuration_incomplete"
-        : "immediate_execution_path";
+        : immediate.isResponsibleUserDenialRun === true
+          ? "responsible_user_denial"
+          : "immediate_execution_path";
     return { kind: "blocked", notice };
   }
 
