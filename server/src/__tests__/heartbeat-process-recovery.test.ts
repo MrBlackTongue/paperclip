@@ -2923,6 +2923,25 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .toMatchObject({ status: "active", resolvedAt: null });
   });
 
+  it.each(["RESPONSIBLE_USER_UNAUTHORIZED", "RESPONSIBLE_USER_UNAVAILABLE"] as const)(
+    "keeps a %s denial failed when a successful native result is committed",
+    async (errorCode) => {
+      const f = await seedPendingNativeFinalization();
+      await db.update(heartbeatRuns).set({ errorCode, error: "Responsible user denied the request" })
+        .where(eq(heartbeatRuns.id, f.runId));
+      await db.insert(workspaceOperations).values({ companyId: f.companyId, issueId: f.issueId,
+        heartbeatRunId: f.runId, phase: "workspace_finalize", status: "succeeded" });
+      await expect(finalizeNativeRun({ db, runId: f.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true }))
+        .resolves.toMatchObject({ phase: "committed" });
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0])
+        .toMatchObject({ status: "failed", errorCode, nativePhase: "committed" });
+      // A later replay of the same committed result keeps the denial.
+      await finalizeNativeRun({ db, runId: f.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0])
+        .toMatchObject({ status: "failed", errorCode });
+    },
+  );
+
   it("retains the exact native owner hold without changing a terminal task's disposition", async () => {
     const f = await seedPendingNativeFinalization();
     await db.update(heartbeatRuns).set({ runnerProfileJson: { nativeWorkspaceFinalizationOwner: { unknown: true } } })

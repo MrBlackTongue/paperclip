@@ -32,6 +32,8 @@ import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./
 import { conversationNativeDecision, isConversation } from "../agent-conversations.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { randomUUID } from "node:crypto";
+import { RESPONSIBLE_USER_DENIAL_CODES } from "@paperclipai/shared";
+import { normalizeResponsibleUserDenialCode } from "../responsible-user-denial-run-outcomes.js";
 import { preserveNativeWorkspaceExportLease } from "./native-workspace-export-resume.js";
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -647,6 +649,10 @@ function publishNativeReviewResponse(run: Pick<typeof heartbeatRuns.$inferSelect
   publishChatPublicationCommitSignal({ companyId: run.companyId, issueId: run.nativeIssueId!,
     runId: run.id, agentId: run.agentId, eventType: "run.presentation.resolved" });
 }
+
+/** True when the current run row records a responsible-user denial. */
+const responsibleUserDenialRecorded = () => sql<boolean>`coalesce(${heartbeatRuns.errorCode} in (${sql.join(
+  RESPONSIBLE_USER_DENIAL_CODES.map((code) => sql`${code}`), sql`, `)}), false)`;
 
 async function materializeCommittedReviewResponse(db: Db, runId: string) {
   try {
@@ -1552,7 +1558,10 @@ export async function finalizeNativeRun(input: {
       const alreadyEmittedByCommittedDecision = decision.effects.some(
         (effect) => effect.kind === "cancel_continuations",
       );
-      const clearExecutionFailure = input.projectRunStatus && finalizationPhase === "committed" && terminalState === "succeeded";
+      // A responsible-user denial fails the run closed even when the provider
+      // later submits a successful result; keep its code for recovery.
+      const clearExecutionFailure = input.projectRunStatus && finalizationPhase === "committed" && terminalState === "succeeded"
+        && normalizeResponsibleUserDenialCode(run.errorCode) === null;
       const finalizationMetadata = {
         ...(providerFailure ? { nativeProviderFailure: providerFailure.diagnostic } : {}),
         ...(turnFailure ? { nativeTurnFailure: turnFailure } : {}),
@@ -1588,15 +1597,22 @@ export async function finalizeNativeRun(input: {
         statusVersionAfter: Number(committed.issue.statusVersion),
         workspaceFinalizeStatus: input.workspaceFinalizeStatus,
       };
-      const projectedStatus = terminalState === "succeeded" ? "succeeded" as const
+      // The run row read above can predate a denial written by a concurrent
+      // request; decide on the current row so a denial is never cleared.
+      const projectedStatus = terminalState === "succeeded"
+        ? sql`case when ${responsibleUserDenialRecorded()} then 'failed' else 'succeeded' end`
         : terminalState === "cancelled" ? "cancelled" as const : "failed" as const;
       const projectedResult = sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
         || ${JSON.stringify(finalizationMetadata)}::jsonb
         || ${clearExecutionFailure ? recoveredExecutionFailureMetadata() : sql`'{}'::jsonb`}`;
       const projectedError = providerFailure ? sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`
-        : clearExecutionFailure ? sql`null` : heartbeatRuns.error;
+        : clearExecutionFailure
+          ? sql`case when ${responsibleUserDenialRecorded()} then ${heartbeatRuns.error} else null end`
+          : heartbeatRuns.error;
       const projectedErrorCode = providerFailure ? sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`
-        : clearExecutionFailure ? sql`null` : heartbeatRuns.errorCode;
+        : clearExecutionFailure
+          ? sql`case when ${responsibleUserDenialRecorded()} then ${heartbeatRuns.errorCode} else null end`
+          : heartbeatRuns.errorCode;
       const projectionChanged = or(
         sql`${heartbeatRuns.nativePhase} is distinct from ${finalizationPhase}`,
         sql`${heartbeatRuns.resultJson} is distinct from ${projectedResult}`,
@@ -1621,7 +1637,7 @@ export async function finalizeNativeRun(input: {
             : {}),
           nativePhase: finalizationPhase,
           nativePhaseUpdatedAt: now,
-          ...(clearExecutionFailure ? { error: null, errorCode: null } : {}),
+          ...(clearExecutionFailure ? { error: projectedError, errorCode: projectedErrorCode } : {}),
           ...(providerFailure ? { error: projectedError, errorCode: projectedErrorCode } : {}),
           resultJson: projectedResult,
           updatedAt: now,
