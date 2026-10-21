@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import {
   clearRememberedResponsibleUserDenialForRun,
   getRememberedResponsibleUserDenialForRun,
+  MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS,
   normalizeResponsibleUserDenialCode,
   recordResponsibleUserDenialOnActiveRun,
   rememberResponsibleUserDenialForRun,
@@ -41,17 +42,40 @@ describe("responsible-user denial run outcomes", () => {
   });
 
   it("remembers a denial until the run finalizer clears it", () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
     expect(
-      rememberResponsibleUserDenialForRun(
-        "run-memory",
-        "RESPONSIBLE_USER_UNAVAILABLE",
-      ),
+      rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAVAILABLE"),
     ).toBe("RESPONSIBLE_USER_UNAVAILABLE");
-    expect(getRememberedResponsibleUserDenialForRun("run-memory")).toBe(
+    expect(getRememberedResponsibleUserDenialForRun(runId)).toBe(
       "RESPONSIBLE_USER_UNAVAILABLE",
     );
-    expect(clearRememberedResponsibleUserDenialForRun("run-memory")).toBe(true);
-    expect(getRememberedResponsibleUserDenialForRun("run-memory")).toBeNull();
+    expect(clearRememberedResponsibleUserDenialForRun(runId)).toBe(true);
+    expect(getRememberedResponsibleUserDenialForRun(runId)).toBeNull();
+  });
+
+  it("ignores a run id that is not a UUID", () => {
+    expect(
+      rememberResponsibleUserDenialForRun("not-a-run-id", "RESPONSIBLE_USER_UNAVAILABLE"),
+    ).toBeNull();
+    expect(getRememberedResponsibleUserDenialForRun("not-a-run-id")).toBeNull();
+  });
+
+  it("keeps the remembered denials bounded, evicting the oldest first", () => {
+    const runIdAt = (index: number) =>
+      `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
+    const total = MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS + 5;
+    for (let index = 0; index < total; index += 1) {
+      rememberResponsibleUserDenialForRun(runIdAt(index), "RESPONSIBLE_USER_UNAUTHORIZED");
+    }
+    for (let index = 0; index < 5; index += 1) {
+      expect(getRememberedResponsibleUserDenialForRun(runIdAt(index))).toBeNull();
+    }
+    expect(getRememberedResponsibleUserDenialForRun(runIdAt(total - 1))).toBe(
+      "RESPONSIBLE_USER_UNAUTHORIZED",
+    );
+    for (let index = 0; index < total; index += 1) {
+      clearRememberedResponsibleUserDenialForRun(runIdAt(index));
+    }
   });
 
   it("records the code on an active run and publishes the live status payload", async () => {

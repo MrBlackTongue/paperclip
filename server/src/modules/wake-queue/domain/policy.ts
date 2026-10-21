@@ -394,6 +394,11 @@ export function decideReleaseRecovery(facts: ReleaseRecoveryFacts): ReleaseRecov
     if (shared.isStrandedRecoveryOrigin) {
       return { kind: "blocked_recovery_in_place" };
     }
+    // A reviewer retry inherits the same responsible user, so it would repeat
+    // the denial exactly like an assignee retry.
+    if (immediate.isResponsibleUserDenialRun === true) {
+      return { kind: "blocked", notice: "responsible_user_denial" };
+    }
     const shouldBlock =
       !shared.recoveryAgentInvokable ||
       !shared.recoveryAgentPresent ||

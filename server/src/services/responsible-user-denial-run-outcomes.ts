@@ -12,6 +12,16 @@ const pendingResponsibleUserDenialCodesByRunId = new Map<
   ResponsibleUserDenialCode
 >();
 
+/**
+ * Upper bound on remembered denials. The run id comes from the caller, so the
+ * map must not grow without limit when a run never reaches finalization; the
+ * oldest entries are evicted first. Entries exist only between a failed durable
+ * write and that run's finalization, so the bound is never reached in practice.
+ */
+export const MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS = 1024;
+
+const RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function normalizeResponsibleUserDenialCode(
   code: unknown,
 ): ResponsibleUserDenialCode | null {
@@ -47,7 +57,13 @@ export function rememberResponsibleUserDenialForRun(
 ): ResponsibleUserDenialCode | null {
   const normalizedRunId = runId.trim();
   const normalizedCode = normalizeResponsibleUserDenialCode(code);
-  if (!normalizedRunId || !normalizedCode) return null;
+  if (!RUN_ID_PATTERN.test(normalizedRunId) || !normalizedCode) return null;
+  pendingResponsibleUserDenialCodesByRunId.delete(normalizedRunId);
+  while (pendingResponsibleUserDenialCodesByRunId.size >= MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS) {
+    const oldest = pendingResponsibleUserDenialCodesByRunId.keys().next().value;
+    if (oldest === undefined) break;
+    pendingResponsibleUserDenialCodesByRunId.delete(oldest);
+  }
   pendingResponsibleUserDenialCodesByRunId.set(normalizedRunId, normalizedCode);
   return normalizedCode;
 }
