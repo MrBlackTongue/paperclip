@@ -11163,6 +11163,12 @@ export function issueRoutes(
       res.status(403).json({ error: "Board authentication required" });
       return;
     }
+    // The agent path gets the same guards as a document write: issue access and
+    // checkout ownership, and no deliverable changes from status-only runs.
+    if (isConversationAgent) {
+      if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+      if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
+    }
     const keyParsed = issueDocumentKeySchema.safeParse(
       String(req.params.key ?? "")
         .trim()

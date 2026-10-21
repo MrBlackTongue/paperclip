@@ -399,14 +399,14 @@ describe("issue document revision routes", () => {
       source: "agent_key",
     } as Express.Request["actor"];
 
-    function mockIssue(conversationAgentId: string | null) {
+    function mockIssue(conversationAgentId: string | null, assigneeAgentId = "agent-1") {
       mockIssueService.getById.mockResolvedValue({
         id: issueId,
         companyId,
         identifier: "PAP-881",
         title: "Chat with agent",
-        status: "in_progress",
-        assigneeAgentId: "agent-1",
+        status: "todo",
+        assigneeAgentId,
         conversationAgentId,
         conversationUserId: conversationAgentId ? "board-user" : null,
       });
@@ -419,6 +419,35 @@ describe("issue document revision routes", () => {
 
       expect(res.status).toBe(200);
       expect(mockDocumentsService.deleteIssueDocument).toHaveBeenCalledWith(issueId, "plan");
+    });
+
+    it("blocks status-only recovery runs of the conversation agent from deleting documents", async () => {
+      mockIssue("agent-1");
+      const res = await request(await createApp(
+        { ...conversationAgent, runId: "run-1", source: "agent_jwt" } as Express.Request["actor"],
+        createRunContextDb({
+          recoveryIntent: "status_only",
+          allowDeliverableWork: false,
+          allowDocumentUpdates: false,
+          resumeRequiresNormalModel: true,
+        }),
+      )).delete(`/api/issues/${issueId}/documents/plan`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("Status-only recovery runs cannot update issue documents");
+      expect(mockDocumentsService.deleteIssueDocument).not.toHaveBeenCalled();
+    });
+
+    it("denies the conversation agent when the issue is owned by another agent", async () => {
+      mockIssue("agent-1", "agent-2");
+      mockAccessService.decide.mockImplementation(async ({ action }: { action: string }) => ({
+        allowed: action !== "tasks:manage_active_checkouts",
+      }));
+      const res = await request(await createApp(conversationAgent)).delete(`/api/issues/${issueId}/documents/plan`);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
+      expect(mockDocumentsService.deleteIssueDocument).not.toHaveBeenCalled();
     });
 
     it("still requires board authentication on another agent's conversation", async () => {
