@@ -1,4 +1,6 @@
+import { pendingTaskRepository } from "../task-workspace-tools.js";
 import { eligibleIssueMonitorWait } from "../issue-monitors.js";
+import { assertNativeCaseHandoffResult } from "./native-case-handoff.js";
 import { activeIssueInteractionCondition, ordinaryQuestionCondition } from "../issue-question-context.js";
 import { publishedTaskDocuments, validateNativeDeliverableEvidence } from "./native-deliverable-feedback.js";
 import { findAutomaticCompletionReviews } from "./automatic-completion-reviews.js";
@@ -24,6 +26,8 @@ import {
   normalizePrpResultSignals,
   type PrpStructuredRunResult,
 } from "../../vendor/paperclip-runner/index.js";
+
+const repositoryYieldCorrection = 'This task has a saved repository preparation for its next admission. This is routine setup, not a blocker. Call paperclip_finish with reportedWorkDisposition="yielded" and omit continuation (or use null); Paperclip will select the saved workspace continuation. Preserve the completed work and explain what remains. Do not repeat setup, set a timer, or ask the user to restart.';
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -63,6 +67,8 @@ export async function nativeCompletionFeedback(
     )
     .then((rows) => rows[0]);
   if (!issue) throw new Error("Completion task no longer exists.");
+  const acceptedHandoff = await assertNativeCaseHandoffResult(db, runId, issue.id, result);
+  if (acceptedHandoff) return "The persisted case handoff controls this turn. End the turn; the task remains open for its next agent.";
   const reviewContext = readNativeReviewAssignmentContext(run.contextSnapshot);
   if (reviewContext) {
     if (result.continuation?.kind === "monitor") throw new Error("Review-only runs cannot yield to a task monitor; resolve the assigned review or report its blocker.");
@@ -233,6 +239,23 @@ export async function nativeCompletionFeedback(
   if (readiness.unresolvedBlockerCount > 0) {
     return `Completion report accepted; this task still has unresolved dependencies. Explain the blockers on [this task](/issues/${issue.identifier ?? issue.id}); do not say the task is done.`;
   }
+  const unfinishedWork = !result.completionClaim.objectiveSatisfied || result.completionClaim.remainingWork.some(work => work.blocksCompletion);
+  if (result.reportedWorkDisposition === "blocked" && result.blocker?.owner.kind === "system" &&
+      result.blocker.scope === "current_track" && result.blocker.reasonCode === "repository_checkout_pending" &&
+      unfinishedWork &&
+      signals.actionableAttentionRequests.length === 0 && issue.workMode === "standard" &&
+      issue.executionRunId === run.id && run.status === "running") {
+    const repositoryIds = result.evidence.flatMap(evidence => {
+      if (typeof evidence.ref !== "string") return [];
+      const match = /^repository-preparation:([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.exec(evidence.ref);
+      return match ? [match[1]!] : [];
+    });
+    const repository = await pendingTaskRepository(db, { companyId: run.companyId, issueId: issue.id, workspaceId: issue.executionWorkspaceId, repositoryIds });
+    if (repository &&
+        !(await issueTreeControlService(db).getActivePauseHoldGate(run.companyId, issue.id))) {
+      throw new Error(repositoryYieldCorrection);
+    }
+  }
   if (result.reportedWorkDisposition === "yielded" && result.continuation?.kind === "monitor") {
     return `Monitor wait accepted. The task remains active and Paperclip will wake its assignee at or after ${issue.monitorNextCheckAt!.toISOString()} with issue_monitor_due. End this turn; do not poll or mark the task done.`;
   }
@@ -240,7 +263,7 @@ export async function nativeCompletionFeedback(
     !isConversation(issue) &&
     result.reportedWorkDisposition === "yielded" &&
     result.continuation?.kind === "response_wake" &&
-    result.completionClaim.remainingWork.some((entry) => entry.blocksCompletion) &&
+    unfinishedWork &&
     signals.actionableAttentionRequests.length === 0
   ) {
     const pause = await issueTreeControlService(db).getActivePauseHoldGate(
@@ -255,8 +278,10 @@ export async function nativeCompletionFeedback(
     });
     // Conversation turns and revoked chat authority retain their own lifecycle.
     if (chatWait === "not_applicable") {
+      const repository = await pendingTaskRepository(db, { companyId: run.companyId, issueId: issue.id, workspaceId: issue.executionWorkspaceId });
+      if (repository) throw new Error(repositoryYieldCorrection);
       throw new Error(
-        "The response_wake report includes blocking remaining work without a pending wait condition. Answering a user comment does not pause the task. Continue the authorized work, register a same_agent continuation, or report the concrete blocker or required question. Do not repeat completed work.",
+        "The response_wake report includes an unfinished objective or blocking remaining work without a pending wait condition. Answering a user comment does not pause the task. Continue the authorized work, or report the concrete blocker or required question. Do not repeat completed work.",
       );
     }
   }

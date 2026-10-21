@@ -14,8 +14,12 @@ import {
   authUsers,
   agentWakeupRequests,
   activityLog,
+  caseHandoffs,
+  cases,
   companies,
   createDb,
+  documentRevisions,
+  documents,
   environmentLeases,
   environments,
   heartbeatRuns,
@@ -42,9 +46,10 @@ import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbe
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
-import { instanceSettingsService } from "../services/instance-settings.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { issueService } from "../services/issues.js";
+import { caseHandoffService } from "../services/case-handoffs.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
 import { withNativeWorkspaceFinalizationOwnership } from "../services/native-runtime/native-workspace-finalization-ownership.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
 
@@ -106,6 +111,7 @@ describe("issueRecoveryActionService", () => {
     });
 
     const fakeDb = {
+      async transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> { return fn(fakeDb); },
       select: vi.fn(() => makeSelectQuery(selectResults.shift() ?? [])),
       update: vi.fn(() => ({
         set: vi.fn(() => ({
@@ -158,6 +164,10 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   }, 30_000);
 
   afterEach(async () => {
+    await db.delete(caseHandoffs);
+    await db.delete(cases);
+    await db.delete(documentRevisions);
+    await db.delete(documents);
     await db.delete(workspaceOperations);
     await db.delete(issueThreadInteractions);
     vi.unstubAllEnvs();
@@ -557,7 +567,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       livenessState: "needs_followup",
     } as const;
 
-    await Promise.all([
+    const results = await Promise.all([
       recovery.escalateStrandedAssignedIssue({
         issue: sourceIssue,
         previousStatus: "in_progress",
@@ -571,6 +581,9 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         comment: "Automatic continuation recovery failed.",
       }),
     ]);
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.filter((result) => result === null)).toHaveLength(1);
 
     const actionRows = await db
       .select()
@@ -586,7 +599,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       previousOwnerAgentId: coderId,
       returnOwnerAgentId: coderId,
       cause: "stranded_assigned_issue",
-      attemptCount: 2,
+      attemptCount: 1,
       evidence: expect.objectContaining({
         routingPolicy: "board_escalation_no_takeover_v1",
       }),
@@ -1158,9 +1171,9 @@ describeEmbeddedPostgres("issue recovery actions", () => {
 
   it.each(["status", "checkoutRunId", "executionRunId"] as const)("preserves a routine_execution %s that changed after recovery read it (GH #9201)", async (field) => {
     const { companyId, coderId, prefix } = await seedCompany();
-    // The cancelling transaction locks the issue and compares its status against the
-    // status recovery observed. A stale snapshot must neither cancel the firing nor
-    // fall through and resurrect a completed issue as blocked.
+    // The escalation transaction locks the issue and compares it against the
+    // snapshot recovery observed. A stale snapshot must neither cancel the firing
+    // nor fall through and resurrect a completed issue as blocked.
     const routineIssue = await seedRoutineExecutionIssue({
       companyId,
       assigneeAgentId: coderId,
@@ -1192,7 +1205,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       } as const,
     });
 
-    expect(result).toMatchObject(changed);
+    expect(result).toBeNull();
     const [updated] = await db.select().from(issues).where(eq(issues.id, routineIssue.id));
     expect(updated).toMatchObject(changed);
     const actions = await db
@@ -1364,6 +1377,185 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(comments.every((comment) => !comment.body?.includes("cancelled this recurring-run artifact"))).toBe(true);
   });
 
+  it.each(["done", "cancelled", "reassigned", "returned_to_todo"] as const)(
+    "preserves a concurrent %s decision when stale stranded recovery waits for the issue lock",
+    async (decision) => {
+      const { companyId, managerId, coderId, sourceIssue } = await seedCompany();
+      const issuesSvc = issueService(db);
+      const observed = (await issuesSvc.update(sourceIssue.id, { status: "todo" }))!;
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+      const enqueueWakeup = vi.fn(async () => null);
+      const recovery = recoveryService(db, { enqueueWakeup });
+      const operatorDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+      const probeDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+      let release!: () => void;
+      let ready!: () => void;
+      let holderPid = 0;
+      const locked = new Promise<void>((resolve) => { ready = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const operator = operatorDb.transaction(async (tx) => {
+        await tx.select({ id: issues.id }).from(issues)
+          .where(eq(issues.id, observed.id)).for("update");
+        holderPid = (await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`))[0]!.pid;
+        ready();
+        await gate;
+        if (decision === "returned_to_todo") {
+          await issuesSvc.update(observed.id, { status: "in_progress" }, tx);
+          return issuesSvc.update(observed.id, { status: "todo" }, tx);
+        }
+        return issuesSvc.update(observed.id, decision === "reassigned"
+          ? { assigneeAgentId: managerId }
+          : { status: decision }, tx);
+      });
+      await locked;
+      const escalation = recovery.escalateStrandedAssignedIssue({
+        issue: observed,
+        previousStatus: "todo",
+        latestRun: null,
+        comment: "The original assignee is not invokable.",
+      });
+      let waiting = false;
+      let winner: Awaited<typeof operator>;
+      try {
+        const deadline = Date.now() + 5_000;
+        while (!waiting && Date.now() < deadline) {
+          const [state] = await probeDb.execute<{ waiting: boolean }>(sql`
+            select exists (select 1 from pg_stat_activity
+              where datname = current_database() and wait_event_type = 'Lock'
+                and ${holderPid} = any(pg_blocking_pids(pid))) as waiting
+          `);
+          waiting = state!.waiting;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      } finally {
+        release();
+        winner = await operator;
+      }
+      const result = await escalation;
+      expect(waiting, "recovery must contend with the actual operator row lock").toBe(true);
+      expect(result).toBeNull();
+      const [saved] = await db.select().from(issues).where(eq(issues.id, observed.id));
+      expect(winner).toMatchObject(saved!);
+      expect(saved).toMatchObject({
+        status: decision === "done" || decision === "cancelled" ? decision : "todo",
+        assigneeAgentId: decision === "reassigned" ? managerId : coderId,
+      });
+      expect(await db.select().from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, observed.id))).toEqual([]);
+      expect(await db.select().from(issueComments)
+        .where(eq(issueComments.issueId, observed.id))).toEqual([]);
+      expect(await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.companyId, companyId))).toEqual([]);
+      expect(await db.select().from(activityLog)
+        .where(eq(activityLog.entityId, observed.id))).toEqual([]);
+      expect(enqueueWakeup).not.toHaveBeenCalled();
+    },
+  );
+
+  it("escalates an unchanged paused-assignee snapshot and publishes its committed notice", async () => {
+    const { companyId, coderId, sourceIssue } = await seedCompany();
+    const observed = (await issueService(db).update(sourceIssue.id, { status: "todo" }))!;
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+    const enqueueWakeup = vi.fn(async () => null);
+    const result = await recoveryService(db, { enqueueWakeup }).reconcileStrandedAssignedIssues();
+    expect(result).toMatchObject({ escalated: 1, issueIds: [observed.id] });
+    expect(await db.select().from(issues).where(eq(issues.id, observed.id)))
+      .toMatchObject([{ status: "blocked", assigneeAgentId: coderId }]);
+    expect(await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, observed.id)))
+      .toMatchObject([{ status: "active", previousOwnerAgentId: coderId }]);
+    expect(await db.select().from(issueComments)
+      .where(eq(issueComments.issueId, observed.id))).toHaveLength(1);
+    expect(await db.select().from(activityLog)
+      .where(eq(activityLog.entityId, observed.id)))
+      .toMatchObject([{ details: expect.objectContaining({ status: "blocked" }) }]);
+    expect(await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId))).toEqual([]);
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["awaiting_release", "pending_dispatch"] as const)("preserves an accepted %s agent transfer at both recovery boundaries", async state => {
+    const { companyId, coderId, managerId, sourceIssue } = await seedCompany();
+    await instanceSettingsService(db).updateExperimental({ enableCases: true });
+    if (state === "awaiting_release") {
+      const runId = randomUUID();
+      await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssue.id, status: "failed" });
+      await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId })
+        .where(eq(issues.id, sourceIssue.id));
+    }
+    const [observed] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+    const toAgentId = state === "awaiting_release" ? managerId : coderId;
+    const receipt = await caseHandoffService(db).handoff(companyId,
+      { type: "board", source: "local_implicit" }, {
+        idempotencyKey: randomUUID(),
+        case: { create: { caseType: "work", title: "Continue accepted work" } },
+        bindIssueId: observed!.id,
+        expectedIssueStatusVersion: observed!.statusVersion,
+        toAgentId,
+        phase: "verification",
+        instructions: "Verify the saved work after the source execution settles.",
+        workflow_document_text: "Implementation → verification → done.",
+      });
+    expect(receipt.state).toBe(state);
+    const [pending] = await db.select().from(issues).where(eq(issues.id, observed!.id));
+    if (state === "awaiting_release") expect(pending).toMatchObject({
+      status: observed!.status,
+      statusVersion: observed!.statusVersion,
+      lastStatusDecisionId: observed!.lastStatusDecisionId,
+      assigneeAgentId: observed!.assigneeAgentId,
+      executionRunId: observed!.executionRunId,
+      checkoutRunId: observed!.checkoutRunId,
+    });
+    else expect(pending).toMatchObject({ status: "todo", assigneeAgentId: coderId });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, pending!.id));
+    const activities = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId)).orderBy(activityLog.id);
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+    // A fresh issue snapshot alone cannot identify the ledger's successor.
+    // The locked mutation boundary must consult the accepted handoff too.
+    expect(await recovery.escalateStrandedAssignedIssue({
+      issue: pending!, previousStatus: state === "awaiting_release" ? "in_progress" : "todo", latestRun: null,
+      comment: "The original assignee is not invokable.",
+    })).toBeNull();
+    expect(await recovery.reconcileStrandedAssignedIssues()).toMatchObject({ escalated: 0, issueIds: [] });
+    expect(await db.select().from(issues).where(eq(issues.id, pending!.id))).toEqual([pending]);
+    expect(await db.select().from(caseHandoffs).where(eq(caseHandoffs.id, receipt.handoffId)))
+      .toMatchObject([{ state, toAgentId }]);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, pending!.id))).toEqual(comments);
+    expect(await db.select().from(activityLog).where(eq(activityLog.companyId, companyId)).orderBy(activityLog.id)).toEqual(activities);
+    expect(await db.select().from(issueRecoveryActions)).toEqual([]);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toEqual([]);
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("settles escalation on a one-connection pool (legacy recovery issue: %s)", async (legacyRecoveryIssue) => {
+    const { sourceIssue } = await seedCompany();
+    if (legacyRecoveryIssue) {
+      await db.update(issues).set({ originKind: "stranded_issue_recovery", originId: sourceIssue.id })
+        .where(eq(issues.id, sourceIssue.id));
+    }
+    const [observed] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
+    const singleConnectionDb = createDb(tempDb!.connectionString, { maxConnections: 1 });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const work = recoveryService(singleConnectionDb, { enqueueWakeup: async () => null })
+        .escalateStrandedAssignedIssue({ issue: observed!, previousStatus: "in_progress", latestRun: null });
+      const result = await Promise.race([
+        work,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("escalation borrowed its own exhausted connection pool")), 2_000);
+        }),
+      ]);
+      expect(result).toMatchObject({ id: observed!.id, status: "blocked" });
+      expect(await db.select().from(issueComments).where(eq(issueComments.issueId, observed!.id))).toHaveLength(1);
+      expect(await db.select().from(activityLog).where(eq(activityLog.entityId, observed!.id))).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      await singleConnectionDb.$client.end({ timeout: 0 });
+    }
+  });
+
   // Model the production payload: `requestedRef` keeps the operator spelling,
   // and the fingerprint carries the canonical remote ref. Two equivalent
   // spellings of one remote branch share `identityRef`, so they share one
@@ -1402,7 +1594,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       recoveryCause: "configuration_incomplete",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await issueService(db).getById(sourceIssue.id))!,
       previousStatus: "in_progress",
       latestRun: makeRun("fix/foo", "origin/fix/foo"),
       recoveryCause: "configuration_incomplete",
@@ -1443,7 +1635,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       recoveryCause: "configuration_incomplete",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await issueService(db).getById(sourceIssue.id))!,
       previousStatus: "in_progress",
       latestRun: secondRun,
       recoveryCause: "configuration_incomplete",
@@ -1467,7 +1659,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     // Each run gets one notice bound to the same action; reconciling the
     // latest run again must not duplicate its notice.
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue, previousStatus: "in_progress", latestRun: secondRun,
+      issue: (await issueService(db).getById(sourceIssue.id))!, previousStatus: "in_progress", latestRun: secondRun,
       recoveryCause: "configuration_incomplete",
     });
     const notices = await db
@@ -1500,7 +1692,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       recoveryCause: "configuration_incomplete",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await issueService(db).getById(sourceIssue.id))!,
       previousStatus: "in_progress",
       latestRun: makeRun("fix/bar", "origin/fix/bar"),
       recoveryCause: "configuration_incomplete",
@@ -1574,7 +1766,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       } as const;
 
       await recovery.escalateStrandedAssignedIssue({
-        issue: sourceIssue,
+        issue: (await issueService(db).getById(sourceIssue.id))!,
         previousStatus: "in_progress",
         latestRun,
         ...(explicitCause ? { recoveryCause: explicitCause } : {}),
@@ -2247,7 +2439,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       comment: "Automatic continuation recovery failed.",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await issueService(db).getById(sourceIssue.id))!,
       previousStatus: "in_progress",
       latestRun: secondLatestRun,
       comment: "Automatic continuation recovery failed.",
@@ -2328,7 +2520,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .set({ body: "Workspace recovery was already escalated." })
       .where(eq(issueComments.issueId, sourceIssue.id));
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await issueService(db).getById(sourceIssue.id))!,
       previousStatus: "in_progress",
       latestRun: secondLatestRun,
       comment: "Workspace failed validation.",
@@ -2418,7 +2610,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       id: randomUUID(),
     };
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await issueService(db).getById(sourceIssue.id))!,
       previousStatus: "in_progress",
       latestRun: secondLatestRun,
       comment: "Automatic continuation recovery failed.",

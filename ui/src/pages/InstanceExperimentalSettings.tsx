@@ -435,7 +435,7 @@ export function InstanceExperimentalSettings() {
 
         <ExperimentalToggleCard
           title="Experimental fast responses"
-          description="Show Connections in company settings and allow short acknowledgements while agents begin work."
+          description="Allow short acknowledgements while agents begin work. Configure them in Settings → Connections."
           checked={experimentalQuery.data?.enableFastResponses ?? false}
           onCheckedChange={(checked) => toggleMutation.mutate({ enableFastResponses: checked })}
           disabled={toggleMutation.isPending}
@@ -505,6 +505,18 @@ export function InstanceExperimentalSettings() {
         />
 
         <ExperimentalToggleCard
+          title="Muse — Personal agent"
+          description="Connect your personal Meta Muse. Pair it, detect its receiver, and verify an independent background reply before assigning tasks."
+          footnote="Requires Paperclip Runner and an authenticated instance with a public HTTPS URL. Turning this off blocks new work; cleanup and stop evidence remain available. Provider usage and cost are unavailable."
+          checked={experimentalQuery.data?.enableMuse === true}
+          onCheckedChange={(checked) => toggleMutation.mutate({ enableMuse: checked })}
+          disabled={toggleMutation.isPending}
+          settingKey="enableMuse"
+          managed={managedKeys.enableMuse}
+          ariaLabel="Toggle Muse experimental setting"
+        />
+
+        <ExperimentalToggleCard
           title="OpenAI Dot"
           description="Add OpenAI Dot as a standalone agent choice. Pair your Dot and verify event delivery before assigning work."
           footnote="Requires Assistant connections (MCP) and an authenticated instance with a public HTTPS URL. Turning this off blocks Dot calls and new work; saved connections are kept."
@@ -519,7 +531,7 @@ export function InstanceExperimentalSettings() {
 
         <ExperimentalToggleCard
           title="Paperclip Runner"
-          description="Allow new Codex agents to select the experimental Rust Paperclip Runner, including authenticated runner ingress when a sandbox requires it. Onboarding continues to use legacy adapters. Turning this off hides the choice without affecting existing native runs."
+          description="Allow agents to select Paperclip Runner, including authenticated runner ingress when a sandbox requires it. First-run setup offers qualified GitHub Copilot. Turning this off hides the choice without affecting existing native runs."
           checked={enableNativeRunner}
           onCheckedChange={(checked) =>
             toggleMutation.mutate({ enableNativeRunner: checked })

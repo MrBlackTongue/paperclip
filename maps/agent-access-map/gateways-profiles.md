@@ -2,6 +2,8 @@
 
 Product map: [Tool gateways and access profiles](../feature-map/gateways-profiles.md).
 
+Feature ID: `gateways-profiles`.
+
 Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
 Native REST transport reconciled in this change; see the
 [shared transport contract](README.md#native-rest-transport).
@@ -12,6 +14,8 @@ qualified. No live agent execution is claimed. Follow the [map contract](../READ
 for format, permission checks, evidence and maintenance.
 
 ## `gateway`
+
+Capability ID: `gateways-profiles/gateway`.
 
 Review: `baseline`.
 
@@ -36,6 +40,8 @@ Gaps: No agent named-gateway management path; assigned tool use exists separatel
 
 ## `profiles`
 
+Capability ID: `gateways-profiles/profiles`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -58,7 +64,14 @@ own policy and access review.
 
 Gaps: Agent access to tools does not permit profile editing.
 
+Backend evidence: [profile entry validation](../../server/src/__tests__/tool-profile-entry-validation.test.ts)
+covers company-scoped selector references and bounded reads for a large immutable
+runtime assignment. Batched validation retains the checks before profile and
+entry writes. It grants no profile-management authority to agents.
+
 ## `client-connect`
+
+Capability ID: `gateways-profiles/client-connect`.
 
 Review: `baseline`.
 
@@ -84,6 +97,24 @@ remaining operations before qualifying the whole capability.
 Gaps: Scoped sessions remain agent/run-bound. MCP requires its existing protocol
 client; named gateways and gateway-token management retain board permissions.
 
+Native assigned-tool results above 500,000 encoded bytes are stored as scoped response assets.
+`read_tool_result` reads bounded JSON pages without repeating the upstream call,
+including when generic `call_api` is disabled.
+Each encoded page is at most 500,000 bytes and continues by byte offset until the
+entire result has been read. Current run authority, same task
+and agent, and asset/responsible-user access remain required. Provider content
+stays untrusted. The
+[response integration tests](../../server/src/services/native-runtime/runner-api.integration.test.ts)
+cover full Unicode reconstruction after controller recreation, low-trust access,
+foreign assets, paused agents, and one upstream execution. The
+[native PRP regression](../../server/src/services/native-runtime/runner-tool-results-prp.integration.test.ts)
+also verifies complete delivery of escape-heavy pages through native Runner,
+including a text wrapper larger than the PRP command limit that is decoded before
+command serialization. The
+[opt-in live probe](../../server/src/__tests__/helpers/verify-assigned-tool-results-live.ts)
+uses real Codex and Runner with a synthetic large upstream response; it does not
+publish to an external service.
+
 Discovery collapses identical descriptors with the same gateway name across
 providers, including native assigned-tool startup and fresh searches. Conflicting
 definitions remain an error. Distinct names and the normal invocation grants,
@@ -92,7 +123,25 @@ approvals and revocation checks remain independent. Regression coverage lives in
 [assigned-tool tests](../../server/src/services/native-runtime/assigned-mcp-tools.test.ts);
 these fixtures do not certify a live external-client journey.
 
+Native assigned tools return bounded input-schema repair guidance after argument
+validation fails. Rejection creates no execution receipt and discloses no submitted
+values or unknown keys. Corrected calls keep the same authorization checks.
+[Runner regressions](../../packages/paperclip-runner/runner/crates/runner-core/src/tests/provider_assigned_tool_validation.rs)
+cover discovery repair and unauthorized calls; the
+[Codex transport fixture](../../packages/paperclip-runner/runner/crates/runner-core/tests/support/codex_assigned_tool_validation.rs)
+covers rejection, corrected dispatch, and completion with a simulated provider.
+This does not establish live model or GitHub access.
+
+Remote invocation regressions preserve access to authorized sibling tools after
+a fetch failure, timeout, non-authentication HTTP error, or JSON-RPC rejection.
+HTTP 401/403 and insufficient-scope errors keep their connection gates. The
+gateway records each failed invocation and never automatically replays it.
+This covers the gateway service with synthetic providers and a local HTTP
+server, not a live external provider or all client surfaces.
+
 ## `tokens`
+
+Capability ID: `gateways-profiles/tokens`.
 
 Review: `baseline`.
 
@@ -119,6 +168,8 @@ the denial.
 
 ## `activity`
 
+Capability ID: `gateways-profiles/activity`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -140,3 +191,27 @@ own policy and access review.
 
 Gaps: Audit management API exists but broad audit visibility is not an agent use-path
 guarantee.
+
+### Execution-host stdio assignments
+
+Runner registers verified, session-local stdio servers from the execution host
+with native Codex and through the shared ACPX runtime. ACPX clients must support
+stdio MCP assignments. The transport uses each implementation's own schemas and
+responses. Each binding requires a private Unix socket to identify the shared
+resource whose calls are serialized. This is a separate binding alongside the
+HTTP gateway; it does not create gateway/profile administration
+authority. Tasks cannot supply these reserved environment inputs. Read-only
+sessions omit them.
+ACPX adapters use their applicable ACPX permission policy. Host-assigned native
+Codex tools run without a new per-call prompt, matching existing execution-host shell
+utilities. Explicit deny/prompt rules remain effective; requested approvals use
+PRP with active thread/turn checks and one-time decisions. Preconfigured Claude
+rejects interactive approval requests. See the [Runner contract](../../packages/paperclip-runner/README.md#assigned-local-mcp-servers).
+
+Local fixture coverage: [binding validation](../../packages/paperclip-runner/src/drivers/stdio-mcp.test.ts),
+[relay processes and cancellation](../../packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs),
+and [approval projection](../../packages/paperclip-runner/src/drivers/codex/codex-question-adapter.test.ts).
+Provider-client image and approval smoke tests used native Codex and Claude SDK;
+that coverage is not an exhaustive adapter compatibility test.
+Vendor-client evidence belongs in the PR. These checks do not
+certify live external credentials, deployment isolation or gateway revocation.

@@ -3,6 +3,8 @@
 Product map: [App access, action permissions, and
 testing](../feature-map/app-permissions.md).
 
+Feature ID: `app-permissions`.
+
 Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
 
 This is a source-reviewed baseline of representative operations and known gaps.
@@ -11,6 +13,8 @@ qualified. No live agent execution is claimed. Follow the [map contract](../READ
 for format, permission checks, evidence and maintenance.
 
 ## `agent-access`
+
+Capability ID: `app-permissions/agent-access`.
 
 Review: `baseline`.
 
@@ -34,7 +38,16 @@ own policy and access review.
 Gaps: Granting access is distinct from using access. No equivalent agent management path
 exists in these routes.
 
+The owning lifecycle plugin can read bounded standing connection and active
+profile assignments with `ctx.agents.getRuntime`. It requires the existing
+`agents.lifecycle.manage` capability and agent ownership checks. Committed
+assignment changes use the opt-in `agent_runtime` stream. These inputs contain
+no grant credentials and do not authorize a task's tool calls. See the
+[runtime contract](../../doc/plugins/AGENT_RUNTIME_SYNC.md#standing-connection-assignments).
+
 ## `action-policy`
+
+Capability ID: `app-permissions/action-policy`.
 
 Review: `baseline`.
 
@@ -60,6 +73,8 @@ explicitly delegated administration should be supported.
 
 ## `catalog-change`
 
+Capability ID: `app-permissions/catalog-change`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -82,7 +97,18 @@ own policy and access review.
 Gaps: Catalog refresh/review and quarantined-action enablement are management
 operations.
 
+Daytona also checks its deployed native contract on the board's
+`GET /api/tool-connections/{connectionId}/catalog`. A changed saved catalog
+refreshes under the viewing human's credential context. Retired tools are
+hidden even if refresh fails. Agent discovery and dispatch reject retired names
+and stale same-name contracts before refresh; new/changed tools stay quarantined until reviewed. The
+[database-backed Daytona fixtures](../../server/src/__tests__/daytona-connection.test.ts)
+exercise this boundary through real run-bound gateway sessions with fixture
+provider responses. They do not qualify a live Daytona account or agent model.
+
 ## `test-action`
+
+Capability ID: `app-permissions/test-action`.
 
 Review: `baseline`.
 
@@ -107,6 +133,8 @@ Gaps: A board test performed as an agent is not proof the agent can manage or in
 testing endpoint.
 
 ## `account-maintenance`
+
+Capability ID: `app-permissions/account-maintenance`.
 
 Review: `baseline`.
 

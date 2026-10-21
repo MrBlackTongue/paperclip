@@ -1,5 +1,112 @@
 # Paid runner full-stack E2E
 
+## Automatic repository continuation
+
+The explicit-only `automatic-repository` suite is an early repair check for
+native Codex and Claude on local and Daytona execution. One browser request
+must stage its managed repository, continue without a timer or another user
+message, and deliver a registered download. The oracle compares downloaded
+JSON with the actual checkout and the original task file. The source admission
+creates an unpredictable reference and registers its bytes before setup. The
+observer must download that source-attributed artifact while only the first
+admission is running, before the successor starts. A missing original, late
+observation, or different successor-created reference fails qualification. The
+successor is instructed to stop on a missing file and never recreate it. Both admissions
+must retain one workspace and commit their native results. The successor must
+have its own dispatch receipt and saved native intent. It starts after the
+predecessor finishes; dispatch must not retag the predecessor. The fixture uses
+production hire instructions and records the selected catalog model. These four
+development cells do not qualify Slack, staging configurations, migration,
+finalization restart, or the complete dependable-work milestone.
+
+Select it explicitly with `--suite automatic-repository`. Every execution has
+one attempt, two expected provider admissions, and 1,000-cent company and agent
+hard stops. Automatic infrastructure retries are disabled. Existing campaign
+reports retain failures, timings, usage, runtime costs, and source identity.
+Source-server startup prepares the existing shared/plugin SDK build dependencies
+before importing native tool authority. Installed-package checks never execute
+checkout build helpers.
+
+## Configured repository and conversion checks
+
+The explicit-only `configured-repository` and `legacy-conversion` suites each
+have four development cells: Codex `gpt-6.1-sol` and Claude `claude-opus-5-5`,
+on local and Daytona environments. Each uses production hire instructions,
+one attempt, one expected provider admission, and 1,000-cent company and agent
+hard stops. The conversion journey creates a real legacy agent and selects
+Paperclip Runner through the public agent update API. It checks retained
+configuration, encrypted secret references, environment, instructions, and
+corresponding permission policy before submitting work through the browser.
+The disposable legacy profile starts without optional CLI-only extra arguments or turn limits;
+the journey does not remove settings from an existing user agent. For either
+provider, Daytona's public environment probe must save platform qualification
+before the same agent selects Runner. Probe leases and uncertain probe accounting
+remain included in attempt evidence and cleanup.
+
+The observer seeds a random reference in the fixture-owned Git checkout before
+task creation. It checks the downloaded JSON against the original file bytes,
+SHA-256 and commit, then checks the preserved source through the workspace API.
+A pass also requires the configured native provider/model, one committed run,
+a visible artifact link after reload, Done, and no pending question. No agent
+success claim or agent-authored test can replace these checks.
+
+The explicit-only `automatic-repository-configured-models` suite reuses the
+projectless continuation oracle above with those same two recorded staging
+models. Its four cells keep the first admission's artifact observation and the
+strict requirement for a saved same-agent continuation. A monitor fallback is
+still a failure of that requirement.
+
+These twelve development cells use API-key authentication and per-turn Runner
+lifecycle. They do not qualify staging subscription credentials, warm Runner
+reuse, Slack delivery, or the complete dependable-work matrix. Run one exact
+ID for a bounded check:
+
+```sh
+pnpm test:e2e:runner -- --id legacy-conversion.runner-codex.local.convert-and-deliver --max-automatic-retries 0
+pnpm test:e2e:runner -- --id automatic-repository-configured-models.runner-codex.local.automatic-repository-resume --max-automatic-retries 0
+```
+
+## Latency observation bounds
+
+The explicit `codie-latency-diagnostic` arms its observation recorder before
+dispatching task creation and measures elapsed time with `performance.now()`.
+The first browser read starts before dispatch; subsequent reads run every 100 ms
+without overlapping. The observer stops and drains before fixture teardown,
+with one one-second deadline for its pending and final reads. On expiry, it
+records `observationTimeouts` and a failed observation for each waiting probe,
+starts no more reads, and ignores late completions. Fixture cleanup owns the
+browser operation that can still be running after that deadline.
+It retains `latencyProbes` in the existing result JSON and dashboard, separately
+for the first visible substantive response and final task/run settlement, with
+an inclusive 30-second target. Platform-generated receipts do not count as the
+substantive response. Browser polls bound persistent visible output; this does
+not measure Slack delivery or qualify transient output between observations.
+These timing verdicts are diagnostic dimensions and do not replace the existing
+workflow matchers or rewrite the original attempt grade.
+
+`latency-timing.ts` is shared by response and acknowledgement timing evidence.
+The browser adapter samples both from one snapshot when an acknowledgement
+target is explicitly configured; the Daytona diagnostic does not enable that
+feature or infer a missing Slack acknowledgement from its browser observations.
+An absent observation and a present observation give `(lastAbsent, firstPresent]`;
+an asynchronous absent read uses its start time, while a present read uses its
+completion time. Each bound is widened by the declared clock resolution.
+Targets specify `<` or `<=`; open and closed endpoints determine equality.
+Pass requires the entire interval to satisfy the target, fail requires the
+entire interval to violate it, and all other cases are inconclusive. Missing
+observations remain null; unknown resolution and invalid/empty intervals cannot
+produce a conclusive verdict. Failed reads are not absent observations.
+
+The historical acknowledgement `(1901, 2427] ms` is inconclusive against
+`<= 2000 ms`; the reply `(52965, 53334] ms` fails `<= 30000 ms`. These are
+deterministic calibration examples, not fresh live measurements. Provider
+message creation/edit timestamps remain separate metadata; an edit can expose
+new response text on an older message. Neither those timestamps nor final run
+settlement substitutes for first visible response. The legacy warm-turn
+`responseLatencyMs` field continues to mean final settlement and is labelled
+accordingly. Report regeneration recomputes interval verdicts, retains changed
+`recordedVerdict` values and all bounds, and leaves the original files intact.
+
 ## Live provider connection journeys
 
 See [PROVIDER-CONNECTIONS.md](PROVIDER-CONNECTIONS.md) for the explicit-only
@@ -21,6 +128,10 @@ profiles. It is deliberately separate from `tests/e2e`: every independently
 scheduled execution gets
 a fresh Paperclip home, embedded Postgres database, instance configuration,
 port, workspace, company, encrypted secrets, environment, and agent.
+
+`pnpm test:e2e:runner:unit` runs the native-completion source gates with
+Node's test runner, then the Product support tests with Vitest. A Node test
+file must not be collected as an empty Vitest suite.
 
 ## Native connection guidance (explicit only)
 
@@ -248,6 +359,28 @@ the communication defect. Use the standard dashboard to compare the ten cells.
 pnpm test:e2e:runner -- --list --suite completion-updates
 pnpm test:e2e:runner -- --suite completion-updates
 ```
+
+## Local report design preview
+
+Iterate on the public history and individual campaign reports with retained real
+data, without starting Paperclip, loading credentials, or calling providers:
+
+```sh
+node --watch --import ./cli/node_modules/tsx/dist/loader.mjs tests/runner-e2e/preview.ts
+```
+
+Open `http://127.0.0.1:4317/runner-e2e/`. The preview uses the production
+`history-index.ts` and `dashboard.ts` renderers. Changes restart the preview
+and reload the browser. Every history link opens a locally rendered report;
+normalized results, public screenshots, and other manifest-listed public evidence
+are downloaded on first access and cached under the ignored
+`tests/runner-e2e/results/design-preview/` directory. Original grades, billing,
+timestamps, and source provenance are retained. No results are republished.
+
+Use `--port 4320` for another port, `--refresh` to refresh the history snapshot,
+or `--offline` to require cached data. Offline mode supports reports and assets
+already visited; it reports uncached artifacts explicitly. The preview contains
+only published evidence, not private Playwright traces or videos.
 
 ## Credentials
 
@@ -624,6 +757,16 @@ pnpm test:e2e:runner:unit
 pnpm test:e2e:runner:typecheck
 ```
 
+The unit command removes ambient `NODE_PATH` and `NODE_OPTIONS` when it starts
+the actual Vitest and Node test processes. It invokes Vitest's JavaScript entry
+directly so pnpm's generated bin shim cannot inject `NODE_PATH` again. Installed
+CLI guards still reject ambient injection and repository-only resolution. Test
+file filters and Vitest options can follow `pnpm test:e2e:runner:unit`; the Node
+prerequisite tests still run after Vitest succeeds. Missing dependencies or an
+unavailable/terminated test process produce a `launcher/environment failure`
+diagnostic and exit 2. Assertion failures retain the test runner's exit status
+and output; assess installed-product failures from those assertions separately.
+
 The OpenRouter ranking snapshot is tracked in `openrouter-models.json`; nightly
 runs never mutate it. Refresh it deliberately, review the source/capture/hash
 diff, and rerun credential-free checks:
@@ -742,8 +885,46 @@ captures remain failed evidence; qualifying a fix requires a new live attempt.
 
 Every completed local campaign also writes
 `tests/runner-e2e/results/<campaign>/dashboard.html`. The self-contained page
-shows the complete profile/environment grid with screenshot thumbnails.
-Expanding a case shows its matchers, pass/fail details, provider/model/runtime,
+shows every selected execution with screenshot thumbnails, grouped by suite and case.
+The history homepage and campaign report render their campaign summaries as
+selectable HTML text, with suite links, pass counts, status, and timing.
+Campaign reports render only selected executions, including selected cases with
+missing evidence or startup failures. Search and feature/suite/profile filters
+sit alongside a folding suite/case sidebar scoped to the current campaign.
+Global Overview, Campaign history, and Needs attention pages have no suite tree.
+All results is one continuous report with an overview and all execution previews.
+Suite links jump into the report; sidebar case links open a focused case view
+with a configuration picker. Clickable Campaign / Suite / Case breadcrumbs
+return to the report and preserve its reading position. Suite contents also link
+to execution previews, with a return to the overview and a bottom-right Back to top.
+Cases appear once in the index across agent/environment configurations; links prefer
+a result matching the active filters and clear conflicting filters when needed
+to reveal their destination.
+Case links show a green status dot when all matching configurations passed,
+red when any failed, and amber for incomplete or missing results. Their tooltip
+summarizes the configurations behind the status; red links prefer a failing
+result. The status follows the active filters, falling back to the whole case
+when none of its configurations match.
+
+`journey-features.ts` associates exact suite/case identities with the stable
+capability IDs from `maps/feature-map/`. The feature selector uses the map's
+existing sections and titles. The expandable Feature coverage view separates
+capability associations, linked test outcomes, gaps, and unmapped journeys.
+These display-only associations do not change prompts, graders, definitions,
+or retained results. Historical reports use the current associations, not a
+claim that those annotations were recorded by the original run. A linked,
+passing scenario does not establish complete capability coverage. Extend the
+associations only after inspecting the journey's assertions; unknown cases stay
+unmapped rather than inheriting coverage from a similarly named suite.
+
+Passing cards emphasize screenshots and show checks and duration beside a
+single Test details disclosure. That disclosure holds billing, evidence links,
+execution identity, and diagnostics; failed and incomplete results keep their
+explanations visible. Screenshots open the gallery, which also links to the
+original image. A floating Back to top control returns to the report heading
+without clearing filters.
+
+Expanding Test details shows matchers, pass/fail details, provider/model/runtime,
 timings, token and cost accounting, and evidence links. The campaign header
 aggregates input, output, and cached tokens, provider-reported LLM spend,
 Daytona list-price runtime estimates, and pricing coverage. Missing provider
@@ -1086,13 +1267,12 @@ model. Configured and provider-observed model identities are reported separately
 There are thirteen cases on `legacy-codex`, `legacy-claude`, `runner-codex`, and
 `runner-acpx-claude`, local only (52 cells). `runner-codex` selects OpenAI in the
 production wizard, omits the runner override, and verifies the saved native
-configuration without changing runners afterward. `legacy-codex` selects
-Legacy runner in Advanced before authentication and creation. Both are labeled
-`production-wizard`. Claude's creation default is unchanged: `legacy-claude`
-retains its wizard configuration, while `runner-acpx-claude` explicitly changes
-runtime through the public API before its first task and is labeled
-`post-onboarding-runtime-switch`. Persona, managed instructions, skills, seeded
-question, and task invocation are preserved. The native path removes the legacy
+configuration without changing runners afterward. `runner-acpx-claude` does the
+same for Claude on its qualified default targets and inspects the saved ACPX
+Claude profile directly. Both Legacy profiles select Legacy runner in Advanced
+before authentication and creation. All four paths are labeled
+`production-wizard`; there is no post-onboarding runner switch. Persona,
+managed instructions, skills, seeded question, and task invocation are preserved. The native path removes the legacy
 Paperclip operational skill because Runner supplies that contract through its
 protocol; other assigned skills, including `/first-task`, are retained.
 Each isolated onboarding company has a $5 task budget. Setup probes have a
@@ -1454,9 +1634,10 @@ prompts, onboarding defaults, or provider permissions are changed.
 
 For native onboarding qualification, select `first-task` with profiles
 `runner-codex,runner-acpx-claude` (26 cells). Codex verifies the production
-creation default with the experimental flag disabled. Claude still uses the
-existing public-API runtime switch before provider work; that case does not
-qualify a native Claude creation default.
+creation default with the experimental flag disabled. Claude also inspects its
+wizard's saved native default with the experimental flag disabled; select that
+profile on a qualified default target. Retained results from the former API-switch
+definition do not establish that the current creation-default journey passed.
 
 Current proof and remaining decisions are recorded in
 [the 21 September qualification report](QUALIFICATION-2026-09-21.md). In particular,
@@ -1540,6 +1721,24 @@ screenshot, billing and environment cleanup checks apply. Use
 immutable Daytona image; no private hooks or fixture database writes are used.
 
 ## Extended ACP harnesses (explicit only)
+
+Copilot protection qualification requires a successful `get_task_context` read
+before the tested native action. The v3 completion oracle independently joins
+its read-only native lifecycle, authoritative result receipt, and canonical tool
+events. It then validates the single finish receipt, accepted result, attached
+command exit, and cleanup. The retained v15 context/completion fixture preserves
+the original failed grade; its context receipt cannot stand in for completion.
+Extra semantic actions and missing, late, failed, or mutating context reads fail.
+The authored pending-permission Stop and provider-death prompts require the
+already-exposed dedicated `get_task_context` tool directly before the native
+edit. `search_api` discovers HTTP routes rather than semantic tools; `call_api`
+and a context-like HTTP response cannot replace the dedicated context receipt.
+Historical bounded discovery proof remains attested separately and cannot
+establish context access or completion.
+The denied-write prompt uses that same dedicated-context guidance.
+The provider-death final UI assertion accepts the current Blocked label with
+its blocker-attention explanation. The API settlement still requires exact
+`blocked`, one failed run, no mutation replay, stale-answer refusal, and cleanup.
 
 `--suite extended-harnesses` declares 30 Product E2E cells: Cursor, Copilot,
 and Pi on local and Daytona, each exercising authenticated completion,
@@ -1688,6 +1887,14 @@ separate capability gap; these callback tests do not claim that export works.
 
 
 ### Remote native evidence and warm continuation
+
+Results can include a `startupReuse` entry for each run. The dashboard shows
+receipt-derived warmth, the environment/lease, workspace, Runner, provider
+process and session decisions, and observed provider launches. Private attempt
+evidence includes `snapshots/startup-reuse.json`. See the
+[run-log contract](../../doc/run-log-events.md#startup-reuse-evidence) for the
+closed states and reasons. Historical runs without receipts show unknown
+values. Provider-session continuity does not establish physical process reuse.
 
 All three native suites use an operator-published instruction file to withhold
 actual work until independent observers are armed inside the exact owned Daytona
@@ -2222,6 +2429,22 @@ always preserves recovery state regardless of this optional diagnostic flag.
 
 The `file-edit-validate` fixture independently downloads the exact active artifact work product from the tested run. It requires the matching run-attributed attachment, filename, MIME type, recorded byte count and SHA-256, then compares the downloaded content to the expected bytes. A workspace file alone cannot satisfy this gate. Explicit failed-case diagnostic retention follows the final result after integrity, isolation and evidence checks, including incomplete publication.
 
+
+## Claude default rollout acceptance
+
+The Claude first-task onboarding case asserts the wizard's saved native profile
+directly. It must not patch a Legacy agent into native execution after creation.
+Ordinary native defaults are qualified by execution target: the first rollout
+enables Apple Silicon only. API-key acceptance requires a useful downloadable
+file, a follow-up revision, independent downloads of both versions, persisted
+configuration and session continuity after reload/restart. Subscription setup
+uses the existing connection tools and receives separate task/follow-up proof.
+
+Keep exact source, runtime executable digests and reports for each candidate.
+Effort or runtime changes require affected acceptance reruns. No automatic paid
+retry campaign is permitted under the separate $50 Claude qualification ceiling.
+Docker and expensive Rust builds run in cloud CI, never on the local Mac.
+
 ## Projectless task workspaces (explicit-only)
 
 `task-workspaces` contains exactly three cells: legacy OpenCode locally and native
@@ -2298,3 +2521,90 @@ context; an arbitrary cache directory does not qualify. Git blob hashes, sizes a
 tracked file in the imported commit, including sibling skills, shared agents,
 binary assets and upstream credits. Both distinct discovery wrappers must point
 to their canonical entrypoints. The task must finish successfully in the UI.
+
+## Persistent case handoffs (explicit only)
+
+For case-page acceptance without any inference, use
+[`cases-read-only.spec.ts`](../e2e/cases-read-only.spec.ts) in the existing browser
+suite. It seeds passive records and linked-task document revisions through production APIs,
+creates no agents, and checks the shipped UI against a fresh server/database:
+
+```sh
+env -u DATABASE_URL -u DATABASE_MIGRATION_URL pnpm exec playwright test --config tests/e2e/playwright.config.ts tests/e2e/cases-read-only.spec.ts --project chromium
+```
+
+This covers record browsing, not agent execution. Use the cells below for the
+same-task agent workflow.
+
+The suite has three separately selectable local Codex cells. Receipt smoke has
+both an API-key profile and a subscription profile; the original arithmetic
+workflow remains subscription-only.
+
+| Cell | Durable result | Work-run bounds |
+|---|---|---|
+| `receipt-smoke` | Case receipt corrected from `{total:6}` to `{total:6,currency:"USD"}` after an independent review | Exactly four task work runs, 90 seconds each, low reasoning effort, one five-minute attempt, 100-cent company and agent budgets for accounted work |
+| `same-task-roundtrip` | Verified arithmetic answer `5` from inputs `2` and `3` | Four to six task work runs, one twelve-minute attempt, 1,000-cent company and agent budgets |
+
+`case-handoffs.runner-codex.local.receipt-smoke` and
+`case-handoffs.runner-codex-subscription.local.receipt-smoke` use one ordinary
+task across triage, builder, verifier and the returning builder. Agents save the
+ordinary primary-task documents `receipt` and `review` through native task tools.
+Kickoff requires `workflow_document_text`, stored on the primary task as `workflow`;
+each phase reads its recipe on demand. Authoring guidance recommends both a
+Mermaid `stateDiagram-v2` map and prose defining every transition; diagrams remain
+advisory and the small test fixture may use prose only. It also seeds a task-owned `brief` through `initialDocuments`; triage must read
+its persisted revision before continuing. Triage uses `read_case` and
+`update_case` to persist input validation; the other phases use `read_document`
+and `write_document`. The verifier checks
+the total and requests the missing currency; the returning builder reads that
+persisted review and updates the same receipt. The oracle requires attributed
+document revisions, four ordered delivered agent handoffs, fresh phase/version context,
+native API/tool receipts, four nonoverlapping successful task runs and task completion.
+The final builder also calls `handoff_case` with `to: "done"`; the fifth ledger
+entry is terminal and completes with the task, closing the case without another
+provider run. Two passive cases exercise browser list filters, and
+Chromium reads back the primary case, its rolled-up task documents and its task. Daily run caps
+are installed before kickoff: triage one, builder two, verifier one.
+
+Production lifecycle setup also performs hello inference outside heartbeat run
+counts and budget accounting. Up to three initial hello probes are expected,
+one per agent. Receipt smoke waits for readiness serially, for at most 45 seconds
+per agent, fails immediately on a reported lifecycle error, and pauses agents
+on failure to prevent the routine 60-second setup retry loop. A readiness timeout
+does not immediately cancel an in-flight probe, so four task runs is not an
+absolute inference cap. The work-run usage report excludes setup probes; their
+detailed tokens and cost are unavailable. Unknown usage does not mean free usage.
+
+`case-handoffs.runner-codex-subscription.local.same-task-roundtrip` uses three
+native Codex agents with the production hire instructions. Public REST kickoff
+creates one case and its task; the agents use the real `handoff_case` tool to
+route that task through triage, implementation, verification and revision.
+The independent oracle requires result `5` for inputs `2` and `3`, saved phase
+observations with fresh handoff versions, four delivered ledger entries, native
+tool lifecycle receipts, and the unchanged primary task. Final case history and
+task completion are inspected in Chromium. No database writes or private runner
+hooks manufacture the outcome.
+
+The local subscription profile requires explicit `CODEX_AUTH_JSON` containing
+only the selected operator login's `auth.json` bytes. Load this value privately
+into the launcher environment; never print it or place it in tracked config.
+Setup stages only that file in the disposable company's normal production
+Codex login slot. The API-key receipt profile instead requires `OPENAI_API_KEY`
+and uses the ordinary encrypted company-secret references for both provider key
+aliases. It stages no subscription login and preserves the same model and
+workflow limits. Credentials must be loaded privately into the launcher, never
+printed or written into tracked configuration. The arithmetic cell permits
+four to six accounted task runs, one attempt, a twelve-minute deadline,
+and 1,000-cent company/agent hard stops. The isolated instance and login are
+removed during ordinary harness cleanup. Usage coverage remains explicit for
+subscription runs; unavailable dollar accounting does not mean zero cost.
+
+```sh
+pnpm test:e2e:runner -- --list --suite case-handoffs
+pnpm test:e2e:runner -- --id case-handoffs.runner-codex.local.receipt-smoke --max-automatic-retries 0
+pnpm test:e2e:runner -- --id case-handoffs.runner-codex-subscription.local.receipt-smoke
+pnpm test:e2e:runner -- --id case-handoffs.runner-codex-subscription.local.same-task-roundtrip
+```
+
+The suite is excluded from `--all`. Its presence is not live qualification;
+inspect the packaged attempt evidence and normal Product E2E report.

@@ -1,9 +1,12 @@
+import { notifyExecutionRunWork } from "./execution-control-notifications.js";
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
 import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchExecutionWaitVerified } from "./pre-dispatch-execution-wait.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
+import { canonicalExecutionUuid } from "./execution-identity.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
@@ -56,11 +59,12 @@ export function legacyExecutionNeedsReconciliation(
   );
 }
 
-/** Review-wait receipts are only exempt after retained execution evidence agrees.
+/** Admission-wait receipts are only exempt after retained execution evidence agrees.
  * The synchronous classifier stays conservative for callers without a DB proof. */
 export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run: Run): Promise<boolean> {
   return await hasUnrestoredRemoteWorkspace(db, run) ||
-    (legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run)));
+    (legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run))
+      && !(await isPreDispatchExecutionWaitVerified(db, run)));
 }
 
 /** Persist the failed legacy run, owned lock release and operator decision together. */
@@ -105,6 +109,7 @@ export async function terminalizeLegacyExecution(input: {
       resultJson: preserveWorkspaceRestoreRecoveryMetadata(current.resultJson,
         input.recordRestoreFailureOnly ? { ...current.resultJson, ...patch.resultJson } : patch.resultJson),
     };
+    await notifyExecutionRunWork(tx);
     let [updated] = await tx
       .update(heartbeatRuns)
       .set({
@@ -195,8 +200,10 @@ export async function terminalizeLegacyExecution(input: {
       (!["done", "cancelled"].includes(task.status) || retainedLeaseIds.length > 0)
     ) {
       // Periodic stranded-work checks may revisit this terminal run before its
-      // reconciled continuation is dispatched. Preserve the recorded decision
-      // and an existing unsafe-workspace hold instead of creating another one.
+      // reconciled or explicitly requested continuation is dispatched. Preserve
+      // its recorded decision instead of creating another hold. The explicit
+      // receipt must identify an actual successor under the same task/agent;
+      // retained user intent remains authoritative after that successor finishes.
       const [reconciled] = await tx.select({ id: issueRecoveryActions.id })
         .from(issueRecoveryActions).where(and(
           eq(issueRecoveryActions.companyId, run.companyId),
@@ -207,6 +214,20 @@ export async function terminalizeLegacyExecution(input: {
           ] : []),
           or(
             sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+            and(
+              sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+              sql`exists (
+                select 1 from heartbeat_runs successor
+                where successor.id = ${canonicalExecutionUuid(sql`${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'runId'`)}
+                  and successor.company_id = ${run.companyId} and successor.agent_id = ${run.agentId}
+                  and coalesce(successor.native_issue_id::text, successor.issue_id::text,
+                    successor.context_snapshot->>'issueId') = ${task.id}
+                  and successor.context_snapshot->>'previousRunId' = ${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'previousRunId'
+                  and successor.context_snapshot->'explicitUserContinuation'->>'previousRunId' = ${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'previousRunId'
+                  and successor.context_snapshot->'explicitUserContinuation'->>'commentId' is not distinct from
+                    ${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'commentId'
+              )`,
+            ),
             and(
               sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
               or(sql`${issueRecoveryActions.evidence}->>'workspaceRestoreFailure' = 'restore_unsafe_archive'`,

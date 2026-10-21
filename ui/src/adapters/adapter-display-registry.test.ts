@@ -6,6 +6,7 @@ describe("adapter display registry", () => {
   it.each([
     ["openai_dot", "OpenAI Dot"],
     ["grok_bot", "Grok Bot"],
+    ["muse", "Muse — Personal agent"],
   ])("keeps saved %s external runners branded by provider", (provider, label) => {
     const type = agentDisplayAdapterType({ adapterType: "paperclip_runner", adapterConfig: { provider } });
     expect(getAdapterDisplay(type).label).toBe(label);

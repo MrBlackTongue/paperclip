@@ -9,22 +9,24 @@ not been consumed, and choose when to steer or interrupt. Stopping a run and
 pausing a task are separate controls. The UI must preserve the message, explain
 why it is waiting, and only claim delivery after an authoritative acknowledgement.
 
+Feature ID: `steering`.
+
 Agent access: [companion](../agent-access-map/steering.md).
 
 ## Sub-features
 
-- `queue`: a busy task saves follow-ups and shows their order and wait reason.
-- `edit-order-discard`: edit full Markdown, reorder, and discard eligible saved
+- `queue`: `steering/queue` — a busy task saves follow-ups and shows their order and wait reason.
+- `edit-order-discard`: `steering/edit-order-discard` — edit full Markdown, reorder, and discard eligible saved
   messages; ownership, revision conflicts, and already-dispatched states matter.
-- `steer`: explicit user action sends a queued message into a compatible active
+- `steer`: `steering/steer` — explicit user action sends a queued message into a compatible active
   run; unavailable capabilities and provider rejection remain visible.
-- `interrupt`: stop the current execution and carry accepted follow-ups into
+- `interrupt`: `steering/interrupt` — stop the current execution and carry accepted follow-ups into
   the eligible continuation without delivering them twice.
-- `stop-and-pause`: distinguish stop-in-flight, confirmed stop, task/ancestor
+- `stop-and-pause`: `steering/stop-and-pause` — distinguish stop-in-flight, confirmed stop, task/ancestor
   pause, agent pause, and budget hold. Resume must respect the actual gate.
-- `drafts`: switching tasks, reloading, and uncertain submission retain the
+- `drafts`: `steering/drafts` — switching tasks, reloading, and uncertain submission retain the
   correct task's draft and attachment receipts.
-- `approval-queue`: answered questions and accepted approvals have durable
+- `approval-queue`: `steering/approval-queue` — answered questions and accepted approvals have durable
   delivery distinct from editable ordinary comments.
 
 ## How to get to it (user POV)
@@ -100,6 +102,17 @@ the task (and separately its ancestor), preserve a draft, then resume the actual
 hold; no hidden send should occur while paused. Check both task presentations
 when available; the named component tests do not prove every host integration.
 
+Fixture-backed recovery check: start with an agent in its completed paused
+lifecycle state, then insert a new accepted `deferred_issue_execution` request
+through the [PostgreSQL recovery fixture](../../server/src/modules/wake-queue/adapters/postgres.test.ts).
+Normal wake admission
+rejects paused agents, so this pending state cannot be created by sending a new
+message through the ordinary UI or API. Let release and periodic recovery run.
+Confirm that the saved request remains pending. Resume the agent, wait for its
+lifecycle to become ready, and verify one delivery. An explicit Pause cancels
+older queued work; those cancelled receipts must not be replayed. A paused
+request must not prevent another eligible recipient's queued work from proceeding.
+
 ### `agent-chat`
 
 Automated: [agent chat sessions](../../tests/e2e/agent-chat-sessions.spec.ts) covers
@@ -154,12 +167,16 @@ gap; do not assume browser queue controls are available in every channel.
 
 #### `drafts`
 
+Capability ID: `steering/drafts`.
+
 Scope: ui
 Storybook: Task-keyed restored draft and attachment receipts; task switch/reload, failed send and uncertain-save recovery.
 Production: Retain correct task draft across navigation and reload; inspect authoritative saved receipt before claiming delivery; do not clear storage on every harness mount.
 Sources: Source: [TaskChatComposer.tsx](../../ui/src/components/task-chat/TaskChatComposer.tsx), [composer-draft.ts](../../ui/src/lib/composer-draft.ts). Tests: [TaskChatComposer.test.tsx](../../ui/src/components/task-chat/TaskChatComposer.test.tsx), [issue-queued-comments-routes.test.ts](../../server/src/__tests__/issue-queued-comments-routes.test.ts)
 
 #### `approval-queue`
+
+Capability ID: `steering/approval-queue`.
 
 Scope: ui
 Storybook: Answered question/accepted approval delivery waiting, eligible steer/interrupt, failed delivery and fresh-session-only approval.

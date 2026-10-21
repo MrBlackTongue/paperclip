@@ -1,67 +1,15 @@
 import { claimNativeSessionResumptions } from "../native-runtime/native-finalization-reconciler.js";
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { agents, agentWakeupRequests, caseHandoffs, cases, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueComments, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
-import { createRunDispatch } from "../../modules/run-dispatch/index.js";
-import type { createWakeQueue } from "../../modules/wake-queue/index.js";
-import { createHeartbeatRunState } from "./run-state.js";
-import { createHeartbeatRunPreparation } from "./run-preparation.js";
+import { createPostgresWakeQueueAdapter } from "../../modules/wake-queue/adapters/postgres.js";
+import { createReleaseIssueExecution } from "../../modules/wake-queue/application/use-cases.js";
 import { createHeartbeatQueue, type HeartbeatQueueDependencies } from "./queue.js";
 
-type Run = typeof heartbeatRuns.$inferSelect;
-function callbacks(db: Db) {
-  const state = createHeartbeatRunState(db);
-  const preparation = createHeartbeatRunPreparation(db);
-  return {
-    ...preparation,
-    ...state,
-    getAgent: vi.fn<HeartbeatQueueDependencies["getAgent"]>(async () => { throw new Error("Unexpected agent lookup"); }),
-    options: {},
-    setRunStatus: vi.fn<HeartbeatQueueDependencies["setRunStatus"]>(async (id, status, patch) =>
-      db.update(heartbeatRuns).set({ ...patch, status }).where(eq(heartbeatRuns.id, id)).returning().then(rows => rows[0] ?? null)),
-    setWakeupStatus: vi.fn<HeartbeatQueueDependencies["setWakeupStatus"]>(async () => undefined),
-    appendRunEvent: vi.fn<HeartbeatQueueDependencies["appendRunEvent"]>(async () => undefined),
-    finalizeAgentStatus: vi.fn(async () => undefined),
-    getAgentInvokability: vi.fn<HeartbeatQueueDependencies["getAgentInvokability"]>(async () => ({ invokable: true })),
-    getWorktreeExecutionCutoff: vi.fn(async () => null),
-    applyRunDispatchPostCommitEffects: vi.fn(),
-    issuesSvc: {
-      getDependencyReadiness: vi.fn<HeartbeatQueueDependencies["issuesSvc"]["getDependencyReadiness"]>(),
-      listDependencyReadiness: vi.fn(async () => new Map()),
-    },
-    treeControlSvc: { getActivePauseHoldGate: vi.fn(async () => null) },
-    budgets: { getInvocationBlock: vi.fn(async () => null) },
-    instanceSettings: { getExperimental: vi.fn<HeartbeatQueueDependencies["instanceSettings"]["getExperimental"]>() },
-    runDispatch: createRunDispatch(db),
-    wakeQueue: {
-      createAdmissionTransactionScope: vi.fn<ReturnType<typeof createWakeQueue>["createAdmissionTransactionScope"]>(),
-      admitWakeBehindIssueExecution: vi.fn<ReturnType<typeof createWakeQueue>["admitWakeBehindIssueExecution"]>(),
-    },
-    activeRunExecutions: new Set<string>(),
-    activeRunExecutionPromises: new Set<Promise<void>>(),
-    activeWakeupPromises: new Set<Promise<unknown>>(),
-    liveRunExecutions: { has: vi.fn(() => false) },
-    isHeartbeatRunTerminalStatus: (status: string | null | undefined) => ["succeeded", "failed", "cancelled", "timed_out"].includes(status ?? ""),
-    isSameTaskScope: (left: string | null, right: string | null) => left === right,
-    runTaskKey: (run: Run) => typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null,
-    filterZombieCoalesceTarget: <T extends { id: string; status: string }>(run: T | null) => run,
-    getSchedulingSuppression: vi.fn(async () => ({ suppressed: false, reason: null } as Awaited<ReturnType<HeartbeatQueueDependencies["getSchedulingSuppression"]>>)),
-    canStartNewExternalBotWork: vi.fn(async () => true),
-    executeRun: vi.fn(async () => undefined),
-    applyWakeQueuePostCommitEffects: vi.fn(async () => undefined),
-    releaseIssueExecutionAndPromote: vi.fn(async () => undefined),
-    publishRunLifecyclePluginEvent: vi.fn(),
-    cancelRunInternal: vi.fn(async () => undefined),
-    cancelActiveForAgentInternal: vi.fn(async () => undefined),
-    resumeExecutionWaitComments: vi.fn(async () => undefined),
-    resumeQueuedCommentInterrupt: vi.fn(async () => undefined),
-    resumeSavedLegacyComments: vi.fn(async () => undefined),
-    formatIssueIdentifierLink: (_identifier: string | null, fallback: string) => fallback,
-    sweepPendingCleanupLeases: vi.fn<HeartbeatQueueDependencies["sweepPendingCleanupLeases"]>(),
-  } satisfies HeartbeatQueueDependencies;
-}
+import { createHeartbeatQueueTestDependencies as callbacks } from "../../__tests__/helpers/heartbeat-queue.js";
+
 function guardedDatabase() {
   const access = vi.fn(() => { throw new Error("Unexpected queue database access"); });
   return { db: new Proxy({}, { get: access }) as Db, access };
@@ -150,6 +98,103 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     await db.update(issues).set({ executionRunId: run.id, executionAgentNameKey: agent.name, executionLockedAt: new Date() }).where(eq(issues.id, issue.id));
     return { company, agent, issue, wake, run };
   }
+
+  async function strandedMention(runtimeMode = "legacy") {
+    const seeded = await fixture("succeeded");
+    await db.update(heartbeatRuns).set({ runtimeMode, nativeIssueId: runtimeMode === "native" ? seeded.issue.id : null, finishedAt: new Date() }).where(eq(heartbeatRuns.id, seeded.run.id));
+    if (runtimeMode === "native") await db.insert(nativeRunFinalizations).values({ runId: seeded.run.id, companyId: seeded.company.id, issueId: seeded.issue.id, phase: "committed" });
+    await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, seeded.issue.id));
+    const [recipient] = await db.insert(agents).values({ companyId: seeded.company.id, name: "Mention recipient", role: "engineer", status: "idle", adapterType: "process", adapterConfig: {} }).returning();
+    const [comment] = await db.insert(issueComments).values({ companyId: seeded.company.id, issueId: seeded.issue.id, body: "Saved feedback", authorAgentId: seeded.agent.id }).returning();
+    const [pending] = await db.insert(agentWakeupRequests).values({ companyId: seeded.company.id, agentId: recipient.id,
+      source: "automation", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+      payload: { issueId: seeded.issue.id, _paperclipWakeContext: { issueId: seeded.issue.id, wakeReason: "issue_comment_mentioned", wakeCommentIds: [comment.id] } },
+    }).returning();
+    return { ...seeded, recipient, pending };
+  }
+
+  it("rechecks a handoff's assignment version under the issue claim lock", async () => {
+    const { company, agent, issue, wake, run } = await fixture("queued");
+    const [record] = await db.insert(cases).values({ companyId: company.id, caseNumber: 1, identifier: "QM-CASE-1",
+      caseType: "work", title: issue.title, workIssueId: issue.id, handoffVersion: 1 }).returning();
+    await db.insert(caseHandoffs).values({ companyId: company.id, caseId: record.id, issueId: issue.id,
+      version: 1, toAgentId: agent.id, phase: "implementation", instructions: "Build the change", actorType: "system",
+      actorId: "test", idempotencyKey: "queue-version-race", inputFingerprint: "fixture", wakeupRequestId: wake.id,
+      expectedIssueStatusVersion: issue.statusVersion, appliedIssueStatusVersion: issue.statusVersion, state: "delivered" });
+    const deps = callbacks(db);
+    deps.getAgent.mockResolvedValue(agent);
+    deps.instanceSettings.getExperimental.mockResolvedValue({ enableCases: true } as Awaited<ReturnType<HeartbeatQueueDependencies["instanceSettings"]["getExperimental"]>>);
+    // Simulate A → B → A after the optimistic receipt read. The agent ID is
+    // unchanged, but the original assignment no longer authorizes a new turn.
+    deps.budgets.getInvocationBlock.mockImplementationOnce(async () => {
+      await db.update(issues).set({ statusVersion: issue.statusVersion + 2 }).where(eq(issues.id, issue.id));
+      return null;
+    });
+    expect(await createHeartbeatQueue(db, deps).claimQueuedRun({ ...run, responsibleUserId: "queue-test-user" })).toBeNull();
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0])
+      .toMatchObject({ status: "queued", startedAt: null });
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
+  it.each(["legacy", "native"])("periodic recovery preserves a paused recipient through the real %s release adapter", async runtimeMode => {
+    const { company, issue, recipient, pending } = await strandedMention(runtimeMode);
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, recipient.id));
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issue.id));
+    const deps = callbacks(db);
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, {
+      resolveResponsibleUserId: async () => "responsible-user",
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async () => null,
+    }), recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined } });
+    deps.releaseIssueExecutionAndPromote.mockImplementation(async (run, options) => {
+      await release({ companyId: run.companyId, runId: run.id, now: new Date(), ...options });
+    });
+    for (let pass = 0; pass < 2; pass++) {
+      await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id)))[0])
+        .toMatchObject({ status: "deferred_issue_execution", runId: null, finishedAt: null, error: null, payload: pending.payload });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, company.id))).toHaveLength(1);
+    }
+    expect(deps.releaseIssueExecutionAndPromote).toHaveBeenCalledTimes(2);
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
+  it.each(["legacy", "native"])("resumes an accepted non-assignee queue through its %s owner", async runtimeMode => {
+    const { run, pending } = await strandedMention(runtimeMode);
+    const deps = callbacks(db);
+    await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+    expect(deps.releaseIssueExecutionAndPromote).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: run.id }), { suppressImmediateRecovery: true, resumeStrandedQueue: true },
+    );
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id)))[0]).toMatchObject({
+      status: "deferred_issue_execution", runId: null, payload: pending.payload,
+    });
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
+  it("preserves a former owner's ordinary messages for the assignment handoff", async () => {
+    const { pending } = await strandedMention();
+    const payload = { ...pending.payload, _paperclipWakeContext: {
+      ...(pending.payload!._paperclipWakeContext as Record<string, unknown>), wakeReason: "issue_commented",
+    } };
+    await db.update(agentWakeupRequests).set({ payload }).where(eq(agentWakeupRequests.id, pending.id));
+    const deps = callbacks(db);
+    await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+    expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null, payload });
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
+  it.each(["queued", "running", "scheduled_retry"])("does not replay a finishing owner while another agent has a %s turn", async status => {
+    const { company, issue, recipient } = await strandedMention();
+    await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: recipient.id, status, invocationSource: "assignment", contextSnapshot: { issueId: issue.id } });
+    const deps = callbacks(db);
+    deps.getAgent.mockResolvedValue({ ...recipient, status: "paused" });
+    await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+    expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
 
   it.each(["claimed", "cancelled"] as const)("releases a running claim while preserving a %s wake", async (wakeStatus) => {
     const { run, issue, wake } = await fixture();

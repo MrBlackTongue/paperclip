@@ -536,13 +536,13 @@ Longer polling intervals alone do not complete an item.
   retain subscription scope, expiry, and replay safety. Source:
   [events.ts](../../server/src/services/public-mcp/events.ts).
 
-- [ ] **JOB-06 — Execution-control reconciliation.** Current: independent
-  **15s** recovery/delivery lanes, including when the main heartbeat is disabled.
-  Change: activate lanes from durable pending work and deadlines. **Complete
-  when:** empty lanes are quiet and abandoned finalizations, replacements,
-  continuations, status/disposition delivery, and login expiry still recover.
-  Sources: [index.ts](../../server/src/index.ts),
-  [execution-control-deadline.ts](../../server/src/services/execution-control-deadline.ts).
+- [x] **JOB-06 — Execution-control reconciliation.** Implemented in
+  [PR #17094](https://github.com/paperclipai/paperclip/pull/17094): six independent
+  workers wake from committed writes, saved control/login deadlines, or concrete
+  unfinished obligations. Empty queues and completed history no longer cause
+  recurring SQL. Existing 15s retries remain for pending work; Cloud sleep
+  eligibility and external alarm coverage are unchanged. See the
+  [worker and producer contract](../idle-execution-control.md).
 
 - [ ] **JOB-07 — Plugin job scheduling.** Current: **30s** SQL even without jobs.
   Change: register nearest `nextRunAt` and signal registration/update/removal.

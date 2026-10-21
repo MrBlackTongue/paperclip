@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, environmentLeases, environments, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, environmentLeases, environments, externalAgentHolds, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { markExecutionReconciliation, validateExecutionReconciliation } from "../execution-recovery-resolution.js";
-import { settleStopOnlyCleanup } from "../sandbox-stop-and-retain.js";
-import { preserveNativeFailedWorkspace } from "./native-failed-workspace-recovery.js";
+import { prepareSandboxStopAndRetain, settleStopOnlyCleanup } from "../sandbox-stop-and-retain.js";
+import { preserveCancelledNativeWorkspaces, preserveNativeFailedWorkspace } from "./native-failed-workspace-recovery.js";
 import type { NativeRestartRecoveryClaim } from "./native-restart-recovery.js";
 import { NativeWorkspaceFinalizationBusyError } from "./native-workspace-finalization-ownership.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
@@ -51,6 +51,80 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
   const readLease = async (id: string) => (await db.select().from(environmentLeases).where(eq(environmentLeases.id, id)))[0]!;
   const actions = async (issueId: string) => db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
 
+  it.each(["acknowledged", "warm", "pending", "foreign", "owned"])("pins historical cancelled work only after an exact Stop acknowledgement: %s", async kind => {
+    const f = await seed();
+    if (kind === "warm") await db.update(environmentLeases).set({ leasePolicy: "reuse_by_environment" }).where(eq(environmentLeases.id, f.lease.id));
+    await db.update(heartbeatRuns).set({ status: "cancelled", nativePhase: "observed", finishedAt: new Date(),
+      resultJson: { cancelledByActorType: "user", cancelledByUserId: "operator", nativeCancellation: {
+        schema: "paperclip.native-cancellation.v1", runId: f.runId,
+        companyId: kind === "foreign" ? randomUUID() : f.companyId, issueId: f.issueId,
+        scope: "run", reasonCode: "cancellation_run_only", dispatchState: kind === "pending" ? "pending" : "acknowledged",
+        dispatched: true, intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID(),
+      } },
+    }).where(eq(heartbeatRuns.id, f.runId));
+    if (kind === "owned") await db.update(nativeRunFinalizations).set({ leaseOwner: "current-controller" })
+      .where(eq(nativeRunFinalizations.runId, f.runId));
+    await preserveCancelledNativeWorkspaces(db);
+    const current = await readRun(f.runId);
+    expect(current).toMatchObject({ status: "cancelled", resultJson: { nativeCancellation: { scope: "run" } } });
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].status).toBe("in_progress");
+    const pinned = kind === "acknowledged" || kind === "warm";
+    expect(await readLease(f.lease.id)).toMatchObject(pinned
+      ? { status: "pending_cleanup", leasePolicy: "retain_on_failure", metadata: { sandboxStopAndRetain: { runId: f.runId } } }
+      : { status: "active", leasePolicy: "ephemeral" });
+    expect(await actions(f.issueId)).toHaveLength(pinned ? 1 : 0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId))).toHaveLength(1);
+  });
+  it("keeps another cancelled workspace recoverable when one task row is locked", async () => {
+    const busy = await seed(), free = await seed();
+    for (const f of [busy, free]) await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(),
+      resultJson: { cancelledByActorType: "user", cancelledByUserId: "operator", nativeCancellation: {
+        schema: "paperclip.native-cancellation.v1", runId: f.runId, companyId: f.companyId, issueId: f.issueId,
+        scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+        intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID(),
+      } },
+    }).where(eq(heartbeatRuns.id, f.runId));
+    let release!: () => void, ready!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const acquired = new Promise<void>(resolve => { ready = resolve; });
+    const holding = db.transaction(async tx => {
+      await tx.select().from(issues).where(eq(issues.id, busy.issueId)).for("update");
+      ready(); await released;
+    });
+    await acquired;
+    try {
+      for (let pass = 0; pass < 3; pass++) await preserveCancelledNativeWorkspaces(db);
+      expect(await readLease(busy.lease.id)).toMatchObject({ status: "active" });
+      expect(await readLease(free.lease.id)).toMatchObject({ status: "pending_cleanup", leasePolicy: "retain_on_failure" });
+    } finally { release(); await holding; }
+  }, 15_000);
+  it.each(["pending_cleanup", "released"])("keeps an exact %s cancellation eligible until its file hold is recorded", async status => {
+    const f = await seed();
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(),
+      resultJson: { cancelledByActorType: "user", cancelledByUserId: "operator", nativeCancellation: {
+        schema: "paperclip.native-cancellation.v1", runId: f.runId, companyId: f.companyId, issueId: f.issueId,
+        scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+        intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID(),
+      } },
+    }).where(eq(heartbeatRuns.id, f.runId));
+    const stopping = await prepareSandboxStopAndRetain(db, f.lease);
+    if (!stopping) throw new Error("Expected the exact stop-only source");
+    if (status === "pending_cleanup") {
+      await preserveCancelledNativeWorkspaces(db);
+      expect((await readRun(f.runId)).resultJson).not.toHaveProperty("workspaceRestoreRecovery");
+      expect(await readLease(f.lease.id)).toMatchObject({ status: "pending_cleanup", leasePolicy: "ephemeral" });
+    }
+    await settleStopOnlyCleanup(db, stopping, { attemptId: String(stopping.metadata?.pendingCleanupAttemptId),
+      receipt: { providerLeaseId: f.lease.providerLeaseId, state: "stopped" } });
+    for (let pass = 0; pass < 3; pass++) await preserveCancelledNativeWorkspaces(db);
+    expect(await readLease(f.lease.id)).toMatchObject({ status: "released", leasePolicy: "retain_on_failure",
+      metadata: { remoteExecutionTermination: { state: "stopped" } } });
+    expect(await readRun(f.runId)).toMatchObject({ status: "cancelled", resultJson: {
+      workspaceRestoreRecovery: { leaseIds: [f.lease.id] },
+    } });
+    expect(await actions(f.issueId)).toHaveLength(1);
+  });
+
   it("pins only the exact unexported source and exposes a file-only recovery card", async () => {
     const f = await seed();
     const [other] = await db.insert(environmentLeases).values({ companyId: f.companyId, heartbeatRunId: f.runId,
@@ -76,23 +150,27 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
       eq(activityLog.action, "issue.workspace_recovery_required")))).toHaveLength(1);
   });
 
-  async function bindExternalInput(f: Awaited<ReturnType<typeof seed>>, provider: "grok_bot" | "openai_dot", change?: (input: { schema: string; binding: { runId: string; companyId: string; agentId: string }; workspace: { access: string } }) => void) {
+  async function bindExternalInput(f: Awaited<ReturnType<typeof seed>>, provider: "grok_bot" | "openai_dot" | "muse", change?: (input: { schema: string; binding: { runId: string; companyId: string; agentId: string; issueId: string }; provider: { kind: string; bridgeRevision?: string }; workspace: { access: string; cwd: string | null } }) => void) {
     const run = await readRun(f.runId);
-    const input = { schema: "paperclip.native-execution-input.v6",
+    const input = { schema: provider === "muse" ? "paperclip.native-execution-input.v8" : "paperclip.native-execution-input.v6",
       binding: { runId: f.runId, companyId: f.companyId, agentId: f.agentId, issueId: f.issueId },
-      provider: { kind: provider }, workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null } };
+      provider: { kind: provider, ...(provider === "muse" ? { bridgeRevision: "muse-v1" } : {}) }, workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null } };
     change?.(input);
-    const [updated] = await db.update(heartbeatRuns).set({ driverKind: provider === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp",
+    const [updated] = await db.update(heartbeatRuns).set({ driverKind: provider === "muse" ? "muse_external" : provider === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp",
       runnerProfileJson: { ...run.runnerProfileJson, nativeExecutionInput: input } }).where(eq(heartbeatRuns.id, f.runId)).returning();
     return updated;
   }
 
-  it.each(["grok_bot", "openai_dot"] as const)("does not invent file recovery for %s admitted without workspace access", async provider => {
+  it.each(["grok_bot", "openai_dot", "muse"] as const)("does not invent file recovery for %s admitted without workspace access", async provider => {
     const f = await seed(), run = await bindExternalInput(f, provider);
+    const [hold] = provider === "muse" ? await db.insert(externalAgentHolds).values({ companyId: f.companyId, agentId: f.agentId,
+      provider: "muse", assignmentId: randomUUID(), bindingId: randomUUID(), bindingGeneration: 1, runId: f.runId,
+      workerUnknown: true, nativeEffectsUnknown: true }).returning() : [];
     await preserveNativeFailedWorkspace(db, run);
     expect((await readRun(f.runId)).resultJson).not.toHaveProperty("workspaceRestoreFailure");
     expect(await readLease(f.lease.id)).toMatchObject({ status: "active", leasePolicy: "ephemeral" });
     expect(await actions(f.issueId)).toHaveLength(0);
+    if (hold) expect((await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.id, hold.id)))[0]).toEqual(hold);
   });
 
   it.each(["run", "company", "agent", "schema", "write_access"])("preserves file safeguards when no-workspace evidence has an invalid %s", async mismatch => {
@@ -107,6 +185,27 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
     await preserveNativeFailedWorkspace(db, run);
     expect((await readRun(f.runId)).resultJson).toHaveProperty("workspaceRestoreFailure", "restore_failed");
     expect(await readLease(f.lease.id)).toMatchObject({ leasePolicy: "retain_on_failure" });
+  });
+
+  it.each(["run", "company", "agent", "issue", "schema", "provider", "bridge", "missing_bridge", "driver", "write_access", "cwd"] as const)("retains file safeguards for a mismatched Muse %s contract", async mismatch => {
+    const f = await seed();
+    await bindExternalInput(f, "muse", input => {
+      if (mismatch === "run") input.binding.runId = randomUUID();
+      if (mismatch === "company") input.binding.companyId = randomUUID();
+      if (mismatch === "agent") input.binding.agentId = randomUUID();
+      if (mismatch === "issue") input.binding.issueId = randomUUID();
+      if (mismatch === "schema") input.schema = "paperclip.native-execution-input.v6";
+      if (mismatch === "provider") input.provider.kind = "grok_bot";
+      if (mismatch === "bridge") input.provider.bridgeRevision = "unknown";
+      if (mismatch === "missing_bridge") delete input.provider.bridgeRevision;
+      if (mismatch === "write_access") input.workspace.access = "read_write";
+      if (mismatch === "cwd") input.workspace.cwd = "/untrusted-task-workspace";
+    });
+    if (mismatch === "driver") await db.update(heartbeatRuns).set({ driverKind: "openai_dot_mcp" }).where(eq(heartbeatRuns.id, f.runId));
+    await preserveNativeFailedWorkspace(db, await readRun(f.runId));
+    expect((await readRun(f.runId)).resultJson).toHaveProperty("workspaceRestoreFailure", "restore_failed");
+    expect(await readLease(f.lease.id)).toMatchObject({ leasePolicy: "retain_on_failure" });
+    expect(await actions(f.issueId)).toHaveLength(1);
   });
 
   it.each(["grok_bot", "openai_dot"] as const)("keeps historical %s inspection holds with an available recovery path", async provider => {

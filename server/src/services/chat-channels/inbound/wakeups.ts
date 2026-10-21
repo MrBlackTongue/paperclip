@@ -116,7 +116,17 @@ export function createInboundWakeups(db: Db, options: WakeupOptions) {
           .set({
             state: "processed",
             processedAt: acceptedAt,
-            redactedError: attachmentOmissionDetail(attachmentResult),
+            redactedError: sql<string | null>`nullif(concat_ws(${"\n"}, (
+              select replace(replace(${chatActions.result}->>'redactedError', ${"\n"}, ' '), ${"\r"}, ' ') from ${chatActions}
+              where ${chatActions.companyId} = ${delivery.companyId}
+                and ${chatActions.endpointId} = ${delivery.endpointId}
+                and ${chatActions.deliveryId} = ${deliveryId}
+                and ${chatActions.providerActionId} = ${`receipt_reaction:${deliveryId}`}
+                and ${chatActions.kind} = 'receipt_reaction'
+                and ${chatActions.status} = 'failed'
+                and ${chatActions.payload}->>'operation' = 'add'
+              limit 1
+            ), ${attachmentOmissionDetail(attachmentResult)}::text), '')`,
             nextAttemptAt: null,
             updatedAt: new Date(),
           })
@@ -352,6 +362,7 @@ export function createInboundWakeups(db: Db, options: WakeupOptions) {
         requestedByActorId: request.requestedByActorId,
         taskKey: context.issue.identifier,
         wakeCommentId: request.commentId,
+        chatConversationId: context.conversation.id,
         attachmentOmissionReasons: claimed.payload.attachmentOmissionReasons as
           | Record<string, number>
           | undefined,

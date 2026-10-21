@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { skillAccessService } from "./skill-access.js";
 import { credentialAccessConnectionNameSql } from "./credential-access-visibility.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
@@ -30,6 +31,7 @@ export interface ActivityFilters {
   entityId?: string;
   limit?: number;
   readCondition?: SQL<boolean>;
+  caseReadCondition?: SQL<boolean>;
 }
 
 const DEFAULT_ACTIVITY_LIMIT = 100;
@@ -356,7 +358,8 @@ export function activityService(db: Db) {
 
   return {
     list: async (filters: ActivityFilters) => {
-      const conditions = [eq(activityLog.companyId, filters.companyId), await skillAccessService(db).activityCondition(filters.companyId)];
+      const conditions = [eq(activityLog.companyId, filters.companyId), await skillAccessService(db).activityCondition(filters.companyId),
+        filters.caseReadCondition ?? sql<boolean>`${activityLog.entityType} <> 'case'`];
       const limit = normalizeActivityLimit(filters.limit);
 
       if (filters.agentId) {
@@ -587,7 +590,7 @@ export function activityService(db: Db) {
       });
     },
 
-    issuesForRun: async (runId: string) => {
+    issuesForRun: async (runId: string, readCondition: SQL<boolean>) => {
       const run = await db
         .select({
           companyId: heartbeatRuns.companyId,
@@ -613,7 +616,9 @@ export function activityService(db: Db) {
             eq(activityLog.companyId, run.companyId),
             eq(activityLog.runId, runId),
             eq(activityLog.entityType, "issue"),
+            eq(issues.companyId, run.companyId),
             visibleIssueCondition(),
+            readCondition,
           ),
         )
         .orderBy(issueIdAsText);
@@ -636,6 +641,7 @@ export function activityService(db: Db) {
             eq(issues.companyId, run.companyId),
             eq(issues.id, contextIssueId),
             visibleIssueCondition(),
+            readCondition,
           ),
         )
         .then((rows) => rows[0] ?? null);
@@ -644,11 +650,10 @@ export function activityService(db: Db) {
       return [fromContext, ...fromActivity];
     },
 
-    create: (data: typeof activityLog.$inferInsert) =>
-      db
-        .insert(activityLog)
-        .values(data)
-        .returning()
-        .then((rows) => rows[0]),
+    create: (data: typeof activityLog.$inferInsert) => db.transaction(async tx => {
+      if (data.entityType === "issue") await notifyDeliveryWork(tx, DELIVERY_QUEUES.mcpEvents, `task:${data.entityId}`);
+      const [row] = await tx.insert(activityLog).values(data).returning();
+      return row;
+    }),
   };
 }

@@ -2,6 +2,8 @@
 
 Product map: [Connection setup](../feature-map/connection-setup.md).
 
+Feature ID: `connection-setup`.
+
 Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
 
 This is a source-reviewed baseline of representative operations and known gaps.
@@ -9,7 +11,14 @@ Each capability needs operation-level review before its entire scope can be
 qualified. No live agent execution is claimed. Follow the [map contract](../README.md)
 for format, permission checks, evidence and maintenance.
 
+Prompt Injection Prevention reuses shared OpenRouter API-key setup directly from
+Settings → Connections. It adds no Apps provider or transport. Credential ownership
+and audience rules are the existing connection rules; saving a connection alone
+does not activate the service. See [service configuration](../../doc/prompt-injection-prevention.md).
+
 ## `catalog`
+
+Capability ID: `connection-setup/catalog`.
 
 Review: `baseline`.
 
@@ -34,7 +43,27 @@ remaining operations before qualifying the whole capability.
 Gaps: Runtime tool broker searches available services without granting connection
 administration.
 
+Notebook is internally gated by `enablePaperclipNotebook` (default off, no settings toggle). Disabled instances hide setup/discovery and deny curated Notebook dispatch and publishing; local removal and grant revocation remain available.
+
+The connector catalog declares the feature key. Shared availability checks use
+the saved application identity. Notebook owns publication and file uploads;
+Paperclip uses its existing MCP tools and OAuth flow.
+
+Notebook source addition: `paperclip-notebook` is discoverable through
+`connections_search` and requestable through `connection_request`. Its standard
+personal authorization requests read, write, share, and delete scopes. Notebook
+page ownership remains enforced by the remote service; a client-supplied agent
+label grants no authority. The direct MCP connection requires no Cloud instance
+enrollment. Notebook fixture evidence: `verified` against disposable PostgreSQL 18
+with controlled MCP responses — [Notebook integration](../../doc/connections/PAPERCLIP-NOTEBOOK.md)
+and [generic OAuth fixture](../../server/src/__tests__/generic-mcp-connection.test.ts).
+Ordinary MCP calls retain assignment and Allowed / Ask first / Off policy.
+Live deployed publication and hosted/self-hosted OAuth remain release checks.
+
+
 ## `identity-and-access`
+
+Capability ID: `connection-setup/identity-and-access`.
 
 Review: `baseline`.
 
@@ -60,6 +89,8 @@ the intended connection.
 
 ## `credentials`
 
+Capability ID: `connection-setup/credentials`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -83,7 +114,16 @@ remaining operations before qualifying the whole capability.
 Gaps: An initiation endpoint exists; it is not authorization to complete the person's
 credential flow.
 
+Daytona native setup uses an organization API key in the selected personal or
+company vault grant. It does not borrow sandbox-provider credentials or CLI
+login tokens. Agents use assigned provider tools through the normal run-bound
+gateway; they cannot export the key. [Database-backed fixtures](../../server/src/__tests__/daytona-connection.test.ts)
+cover selected vault ownership and gateway reads/writes with provider responses
+replaced by fixtures. Real provider authentication remains unqualified.
+
 ## `handoff`
+
+Capability ID: `connection-setup/handoff`.
 
 Review: `baseline`.
 
@@ -108,6 +148,8 @@ own policy and access review.
 Gaps: OAuth/callback and addressed-user checks are deliberate separate boundaries.
 
 ## `draft-recovery`
+
+Capability ID: `connection-setup/draft-recovery`.
 
 Review: `baseline`.
 
@@ -135,6 +177,8 @@ agent API gap.
 
 ## `task-request`
 
+Capability ID: `connection-setup/task-request`.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:
@@ -159,6 +203,8 @@ Gaps: This is the existing agent bridge for human-required setup; do not invent 
 approval system.
 
 ## `channel-setup`
+
+Capability ID: `connection-setup/channel-setup`.
 
 Review: `baseline`.
 
@@ -190,6 +236,8 @@ cover recovery, rollback, retries and idle query silence; they do not establish
 live provider or agent access.
 
 ## `failure`
+
+Capability ID: `connection-setup/failure`.
 
 Review: `baseline`.
 

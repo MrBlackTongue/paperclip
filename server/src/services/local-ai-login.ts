@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -120,6 +121,7 @@ export function localAiLoginService(db: Db) {
       const expiresAt = new Date(Date.now() + ATTEMPT_DURATION_MS);
       await prepareHome(id, intent.provider);
       try {
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.localLoginCleanup);
         await tx.insert(adapterAuthSessions).values({
           id, publicSessionId: id, companyId, environmentId: environment.id,
           adapterType,

@@ -17,6 +17,10 @@
       "description": "Product requirements and review criteria for harness responsibility, minimal user-facing internals, truthful progress, and human decisions."
     },
     {
+      "path": "rules/module-boundaries.mdc",
+      "description": "Module ownership, justification of shared contract changes, delivery scope, and verification across affected consumers."
+    },
+    {
       "path": "rules/runtime-dependency-boundaries.mdc",
       "description": "Dependency cost, responsiveness, and verification requirements for changed server, adapter, and runner execution paths.",
       "scope": [

@@ -33,6 +33,8 @@ export {
 export * from "./native-session-runtime.js";
 export {
   DurablePrpControlPlane,
+  RUNNER_PRP_PROTOCOL_MIN,
+  RUNNER_PRP_PROTOCOL_MAX,
   inspectWarmRunTransition,
   type DurablePrpControlPlaneOptions,
   type PrpWireConnection,
@@ -57,6 +59,7 @@ export {
   type QualifiedAcpxEnvironmentProbe,
 } from "./drivers/acpx/codex-acpx-driver.js";
 export * from "./drivers/acpx/sidecar-protocol.js";
+export { resolveClaudeEffort } from "./drivers/acpx/claude-effort.js";
 export * from "./drivers/runner-tool-bridge.js";
 export {
   createRunnerdCodexTransport,
@@ -91,6 +94,10 @@ export * from "./compatibility.js";
 export { probeAcpxClaudeInstallation, probeAcpxGrokInstallation, probeAcpxPiInstallation } from "./drivers/acpx/installation-integrity.js";
 export { bundledRemoteProviderPackManifestPath, bundledRemoteRunnerBinary } from "./live/bundled-remote-provider-pack.js";
 
+export { RunnerdMuseDriver, describeRunnerdMuseDriver, type RunnerdMuseDriverOptions } from "./drivers/muse/runnerd-muse-driver.js";
 export { RunnerdDotDriver, type RunnerdDotDriverOptions } from "./drivers/dot/runnerd-dot-driver.js";
 
 export type { RunnerExecutionDriver } from "./control-plane/runner-execution-driver.js";
+
+export { bindRunnerLaunchResources, createRunnerProviderLaunch, runnerProviderLaunchRequirements, runnerLaunchRequirementsDigest, validatePreparedRunnerLaunch } from "./live/runner-provider-launch.js";
+export type { RunnerProviderLaunchRequirements, RunnerProviderLaunchEnvironment, PreparedRunnerProviderLaunch, RunnerLaunchPreparer } from "./live/runner-provider-launch.js";

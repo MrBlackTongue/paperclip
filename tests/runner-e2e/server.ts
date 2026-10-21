@@ -4,6 +4,7 @@ import { runnerMatrix } from "./catalog.js";
 import { createRunnerE2EServerStopper, runnerE2EServerDetached } from "./server-stop.js";
 import { runnerE2ETypeScriptProcessArgs } from "./web-server-command.js";
 import { qualifyLegacyClaudeCli } from "./legacy-claude-cli.js";
+import { prepareSourceServerDependencies } from "./source-startup.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -97,6 +98,8 @@ const definedServerEnvironment = Object.fromEntries(
     (entry): entry is [string, string] => entry[1] !== undefined,
   ),
 );
+
+await prepareSourceServerDependencies(repositoryRoot, definedServerEnvironment, usesInstalledCli(process.env));
 
 await Promise.all([
   mkdir(path.dirname(logPath), { recursive: true }),

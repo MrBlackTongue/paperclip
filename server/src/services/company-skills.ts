@@ -3383,6 +3383,11 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   async function listFull(companyId: string): Promise<CompanySkill[]> {
     if (!visibility().canReadCompany(companyId)) return [];
     await ensureSkillInventoryCurrent(companyId);
+    return readFullSkillRows(companyId);
+  }
+
+  async function readFullSkillRows(companyId: string): Promise<CompanySkill[]> {
+    if (!visibility().canReadCompany(companyId)) return [];
     const rows = await db
       .select(selectCompanySkillColumns())
       .from(companySkills)
@@ -6084,6 +6089,20 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
       // with the real cause — a silent drop makes the skill vanish from the
       // runtime while the library still shows it installed.
       try {
+        if (options.materializeMissing === false && !options.snapshotLatest) {
+          // Agent settings enumerate the library, including unselected skills.
+          // Execution, rather than browsing, validates the repository bytes.
+          try {
+            await ensureSkillCacheDirectory(versionPath);
+            const entrypoint = await fs.lstat(path.join(versionPath, "SKILL.md"));
+            if (!entrypoint.isFile() || entrypoint.isSymbolicLink()) throw unprocessable("Unsafe skill cache entrypoint.");
+            return { status: "available", source: versionPath };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            return { status: "missing", source: versionPath,
+              detail: "The selected skill version will be materialized on the next run." };
+          }
+        }
         const versionSource = await materializeVersionSnapshot(companyId, skill, version);
         if (versionSource) return { status: "available", source: versionSource };
         return { status: "missing", source: versionPath, detail: "The selected skill version produced no files." };
@@ -6152,16 +6171,25 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     companyId: string,
     options: RuntimeSkillEntryOptions = {},
   ): Promise<PaperclipSkillEntry[]> {
+    return withRuntimeSkillEntries(companyId, options, entries => entries);
+  }
+
+  async function withRuntimeSkillEntries<T>(
+    companyId: string,
+    options: RuntimeSkillEntryOptions,
+    consume: (entries: PaperclipSkillEntry[]) => T | Promise<T>,
+  ): Promise<T> {
     if (options.onlyKeys?.size === 0 || (!options.onlyKeys && options.selectionConfig && !options.includeLegacy
-      && readPaperclipSkillSyncPreference(options.selectionConfig).desiredSkills.length === 0)) return [];
-    return withSkillVersionCacheLock(db, companyId, () => listRuntimeSkillEntriesLocked(companyId, options));
+      && readPaperclipSkillSyncPreference(options.selectionConfig).desiredSkills.length === 0)) return consume([]);
+    await ensureSkillInventoryCurrent(companyId);
+    return withSkillVersionCacheLock(db, companyId, async () => consume(await listRuntimeSkillEntriesLocked(companyId, options)));
   }
 
   async function listRuntimeSkillEntriesLocked(
     companyId: string,
     options: RuntimeSkillEntryOptions,
   ): Promise<PaperclipSkillEntry[]> {
-    const skills = await listFull(companyId);
+    const skills = await readFullSkillRows(companyId);
     const selectedKeys = options.onlyKeys ?? (options.selectionConfig ? new Set(
       (options.includeLegacy ? resolveLegacyPaperclipDesiredSkillNames : resolvePaperclipDesiredSkillNames)(
         options.selectionConfig, skills.map(skill => ({ key: skill.key, runtimeName: buildSkillRuntimeName(skill.key, skill.slug) }))),
@@ -7442,5 +7470,6 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     installUpdate,
     resetSkill,
     listRuntimeSkillEntries,
+    withRuntimeSkillEntries,
   };
 }

@@ -83,7 +83,10 @@ export async function publishWorkspaceSeedGeneration(
     await fs.mkdir(company, { recursive: true, mode: 0o700 });
     const companyStat = await fs.lstat(company);
     if (!companyStat.isDirectory() || companyStat.isSymbolicLink()) return false;
-    return await withDirectoryMergeLock(company, async () => {
+    const capacity = async (): Promise<"existing" | "available" | false> => {
+      const currentCompany = await fs.lstat(company);
+      if (!currentCompany.isDirectory() || currentCompany.isSymbolicLink()
+        || currentCompany.dev !== companyStat.dev || currentCompany.ino !== companyStat.ino) return false;
       let totalGenerations = 0, totalBytes = 0, workspaces = 0;
       let workspace = { generations: 0, bytes: 0 };
       let workspaceExists = false;
@@ -99,7 +102,7 @@ export async function publishWorkspaceSeedGeneration(
         if (totalGenerations > limits.companyGenerations || totalBytes > limits.companyBytes) return false;
         if (directory === root) { workspace = usage; workspaceExists = true; }
       }
-      if (workspaceExists && await fs.lstat(path.join(root, generation)).then(() => true, () => false)) return true;
+      if (workspaceExists && await fs.lstat(path.join(root, generation)).then(() => true, () => false)) return "existing";
       let incomingBytes = 4096;
       for (const archive of [seed.workspaceArchivePath, seed.gitArchivePath]) {
         if (!archive) continue;
@@ -111,7 +114,14 @@ export async function publishWorkspaceSeedGeneration(
         || totalGenerations + 1 > limits.companyGenerations || totalBytes + incomingBytes > limits.companyBytes
         || workspaces + (workspaceExists ? 0 : 1) > limits.companyWorkspaces) return false;
       assertWorkspaceManifestDiskSpace(company, incomingBytes);
-      if (options.verify && !await options.verify()) return false;
+      return "available";
+    };
+    const initialCapacity = await capacity();
+    if (initialCapacity !== "available") return initialCapacity === "existing";
+    if (options.verify && !await options.verify()) return false;
+    return await withDirectoryMergeLock(company, async () => {
+      const currentCapacity = await capacity();
+      if (currentCapacity !== "available") return currentCapacity === "existing";
       await fs.mkdir(root, { recursive: true, mode: 0o700 });
       const temporary = path.join(root, `.pending-${randomUUID()}`);
       await fs.mkdir(temporary, { mode: 0o700 });

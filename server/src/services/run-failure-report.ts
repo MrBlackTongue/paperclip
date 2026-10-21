@@ -14,6 +14,7 @@ import { isUnexpectedRunCancellation } from "./run-cancellation.js";
 import { readConnectionFailure, type ConnectionFailure } from "@paperclipai/adapter-utils/connection-failure";
 import { isAiConnectionConfigurationReason } from "./ai-connection-configuration-failure.js";
 import { readRunFailureReportingMode, type RunFailureReportingMode } from "../sentry-run-failure-policy.js";
+import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "./workspace-source-restriction.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 
@@ -35,6 +36,27 @@ const PENDING_REPORT_DRAIN_TIMEOUT_MS = 5_000;
 
 function isRunFailureStatus(status: string): status is RunFailureStatus {
   return status === "failed" || status === "timed_out" || status === "cancelled";
+}
+
+type RunFailureTransitionState = Pick<HeartbeatRun, "status" | "runtimeMode" | "nativePhase">;
+
+/**
+ * A native run that waits for a same-run retry is stored as `failed` with
+ * `nativePhase: "retryable_failure"`. That is not terminal: the retry or the
+ * workspace copy-back retry can still finish the run as succeeded.
+ */
+function isPendingNativeRetry(run: RunFailureTransitionState): boolean {
+  return run.status === "failed" && run.runtimeMode === "native" && run.nativePhase === "retryable_failure";
+}
+
+/**
+ * Whether a status write is a new terminal failure to pass to `reportRunFailure`.
+ * A status change counts. A run that leaves a pending native retry but stays
+ * `failed` also counts, because `reportRunFailure` skipped its earlier write.
+ */
+export function isNewTerminalRunFailure(before: RunFailureTransitionState, after: RunFailureTransitionState): boolean {
+  if (after.status !== before.status) return true;
+  return isPendingNativeRetry(before) && !isPendingNativeRetry(after);
 }
 
 function readTaskId(run: HeartbeatRun): string | null {
@@ -120,6 +142,19 @@ function isLocalPathWorkspaceConfigurationBlocker(run: HeartbeatRun, options: Ru
     validation.workspaceStrategyType === "git_worktree" &&
     (validation.requestedExecutionWorkspaceMode === "isolated_workspace" ||
       validation.requestedExecutionWorkspaceMode === "operator_branch") &&
+    recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false;
+}
+
+/** A retained shared checkout denied by task privacy before dispatch; the task notice names the owner action. */
+function isRestrictedWorkspaceSourceBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+  if (
+    run.status !== "failed" || run.errorCode !== "configuration_incomplete" ||
+    run.executionStage !== "preparing" || options.phase !== "setup" ||
+    run.exitCode != null || run.signal != null
+  ) return false;
+  const configuration = asRecord(run.resultJson?.configurationIncomplete);
+  const recovery = asRecord(run.resultJson?.executionRecovery);
+  return configuration?.reason === RESTRICTED_WORKSPACE_SOURCE_REASON &&
     recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false;
 }
 
@@ -224,7 +259,8 @@ async function isRejectedExternalBotWake(db: Db, run: HeartbeatRun): Promise<boo
 
 /**
  * Report a terminal run failure to Sentry. Returns at once for any status
- * other than failures and unexpected started cancellations. Never throws — a Sentry failure or a
+ * other than failures and unexpected started cancellations, and for a native
+ * run that still waits for a same-run retry. Never throws — a Sentry failure or a
  * database read failure must not change the caller's control flow.
  *
  * Call this beside the caller's own terminal-status write, with
@@ -238,10 +274,13 @@ export function reportRunFailure(db: Db, run: HeartbeatRun, options: RunFailureR
   if (mode === "off") return Promise.resolve();
   if (!isRunFailureStatus(run.status)) return Promise.resolve();
   if (run.status === "cancelled" && !isUnexpectedRunCancellation(run)) return Promise.resolve();
+  // The terminal write that ends the retry reports instead (`isNewTerminalRunFailure`).
+  if (isPendingNativeRetry(run)) return Promise.resolve();
   if (mode === "unexpected" && (
     isMissingSecretConfigurationBlocker(run, options) ||
     isAiConnectionSelectionBlocker(run, options) ||
     isLocalPathWorkspaceConfigurationBlocker(run, options) ||
+    isRestrictedWorkspaceSourceBlocker(run, options) ||
     isGitConnectionFailure(run, options) ||
     isProviderQuotaFailure(run, options) ||
     isCodexAcpModelCapacityFailure(run, options) ||

@@ -1,11 +1,12 @@
 export const REMOTE_RUNNER_RECOVERY_ERROR_CODE = "runner_remote_process_identity_unavailable";
 
-const stages = ["identity_marker", "process_verification"] as const;
+const stages = ["runner_state", "identity_marker", "process_verification"] as const;
 const reasons = [
   "marker_missing", "marker_unsafe", "marker_read_failed", "marker_invalid",
   "fingerprint_missing", "process_not_running", "process_identity_changed",
   "fingerprint_unavailable", "process_generation_changed", "probe_timeout",
   "probe_transport_failed", "probe_failed",
+  "state_read_failed", "state_invalid",
 ] as const;
 
 export interface RemoteRunnerRecoveryDiagnostic {
@@ -78,7 +79,7 @@ export function remoteRecoveryProbeReason(stage: RemoteRunnerRecoveryDiagnostic[
     if (exitCode === 31) return "marker_missing";
     if (exitCode === 32) return "marker_unsafe";
     if (exitCode === 33) return "marker_read_failed";
-  } else {
+  } else if (stage === "process_verification") {
     if (exitCode === 41) return "marker_missing";
     if (exitCode === 42) return "marker_unsafe";
     if (exitCode === 43) return "marker_read_failed";

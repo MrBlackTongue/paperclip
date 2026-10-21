@@ -50,6 +50,17 @@ describe("resolveNativeRuntimeMode", () => {
     })).toMatchObject({ kind: "native", profile: { backend: "codex_app_server" } });
   });
 
+  it("admits saved-token Copilot with the generic Runner rollout disabled", () => {
+    expect(resolveNativeRuntimeMode({ ...eligible, enabled: false,
+      adapterConfig: { provider: "acpx", acpxAgent: "copilot", model: "gpt-5.6-luna" },
+    })).toMatchObject({ kind: "native", profile: { backend: "acpx_runtime" } });
+    for (const acpxAgent of ["pi", "cursor", "codex"]) {
+      expect(() => resolveNativeRuntimeMode({ ...eligible, enabled: false,
+        adapterConfig: { provider: "acpx", acpxAgent, model: "gpt-5.6-luna" },
+      })).toThrow(expect.objectContaining({ code: "paperclip_runner_rollout_disabled" }));
+    }
+  });
+
   it.each([
     [false, false],
     [false, true],
@@ -144,16 +155,23 @@ describe("resolveNativeRuntimeMode", () => {
       kind: "native",
       profile: { backend: "acpx_runtime" },
     });
+    expect(resolveNativeRuntimeMode({
+      ...eligible,
+      adapterConfig: { provider: "acpx", acpxAgent: "copilot", model: "gpt-5.6-luna" },
+    })).toMatchObject({
+      kind: "native",
+      profile: { backend: "acpx_runtime" },
+    });
   });
 
-  it("rejects malformed OpenCode and unqualified ACPX profiles", () => {
+  it("rejects malformed OpenCode and unregistered ACPX profiles", () => {
     expect(() => resolveNativeRuntimeMode({
       ...eligible,
       adapterConfig: { provider: "opencode", model: "gpt-5.6-sol" },
     })).toThrow(expect.objectContaining({
       code: "paperclip_runner_opencode_model_invalid",
     }));
-    for (const acpxAgent of ["copilot"]) {
+    for (const acpxAgent of ["unregistered-acpx-agent"]) {
       expect(() => resolveNativeRuntimeMode({
         ...eligible,
         adapterConfig: { provider: "acpx", acpxAgent, model: "explicit-provider-model" },
@@ -500,5 +518,24 @@ describe("resolveHeartbeatRuntimeMode compatibility", () => {
       adapterType: "paperclip_runner",
       adapterConfig: { provider: "opencode", model: "opencode/gpt-5" },
     })).toThrow(NativeRunnerSelectionError);
+  });
+  it("admits native Claude without enabling other ACPX providers", () => {
+    expect(resolveNativeRuntimeMode({ ...eligible, enabled: false, adapterConfig: { provider: "acpx", acpxAgent: "claude" } })).toMatchObject({ kind: "native", profile: { backend: "acpx_runtime" } });
+    expect(() => resolveNativeRuntimeMode({ ...eligible, enabled: false, adapterConfig: { provider: "acpx", acpxAgent: "grok" } })).toThrow(expect.objectContaining({ code: "paperclip_runner_rollout_disabled" }));
+  });
+});
+
+
+describe("Muse native selection", () => {
+  const muse = { ...eligible, museEnabled: true, adapterConfig: { provider: "muse", museBindingId: "00000000-0000-4000-8000-000000000001", allowUnmeteredProvider: true, lifecycleMode: "per_turn" } };
+  it("requires both Runner and Muse rollout gates for fresh work", () => {
+    expect(() => resolveNativeRuntimeMode({ ...muse, museEnabled: false })).toThrow("Enable Muse");
+    expect(() => resolveNativeRuntimeMode({ ...muse, enabled: false })).toThrow("disabled");
+    expect(resolveNativeRuntimeMode(muse)).toMatchObject({ kind: "native", profile: { backend: "muse_external" } });
+  });
+  it("rejects model, workspace and inherited Dot attachment grants", () => {
+    for (const extra of [{ model: "local-model" }, { dotWorkspaceAccess: true }, { dotAttachmentAccess: true }, { lifecycleMode: "warm" }]) {
+      expect(() => resolveNativeRuntimeMode({ ...muse, adapterConfig: { ...muse.adapterConfig, ...extra } })).toThrow("Muse requires");
+    }
   });
 });

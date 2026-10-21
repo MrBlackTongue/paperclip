@@ -1,3 +1,4 @@
+import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 import { activeNativeExecutionRunIds, NATIVE_PREPARATION_FENCING_VERSION } from "./native-active-runs.js";
 import {
@@ -10,6 +11,7 @@ import { and, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  environmentLeases,
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
@@ -19,7 +21,7 @@ import { readProcessStartedAt } from "../hot-restart.js";
 import { getServerInfoSnapshot } from "../../server-info.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { reportRunFailure } from "../run-failure-report.js";
+import { isNewTerminalRunFailure, reportRunFailure } from "../run-failure-report.js";
 import { isNativeRunnerOwnershipHeld } from "./native-runner-ownership.js";
 import { nativeRestartInterruptedTurnId, type PersistedNativeSession } from "../../vendor/paperclip-runner/index.js";
 
@@ -177,11 +179,12 @@ export async function evaluateNativeControllerTakeover(input: {
   } | null;
   isProcessAlive?: (pid: number) => boolean;
   readProcessStartedAt?: (pid: number) => Promise<Date | null>;
+  requireStoppedController?: boolean;
 }): Promise<{ allowed: boolean; reason: string }> {
   const { owner, now } = input;
   const isAlive = input.isProcessAlive ?? processIsAlive;
   const readStartedAt = input.readProcessStartedAt ?? observedProcessStart;
-  if (!owner.leaseOwner || !owner.leaseExpiresAt) {
+  if ((!owner.leaseOwner || !owner.leaseExpiresAt) && !input.requireStoppedController) {
     return { allowed: true, reason: "unowned" };
   }
 
@@ -190,7 +193,7 @@ export async function evaluateNativeControllerTakeover(input: {
     return {
       allowed: false,
       reason:
-        owner.leaseExpiresAt <= now
+        owner.leaseExpiresAt !== null && owner.leaseExpiresAt <= now
           ? "expired_lease_without_controller_identity"
           : "live_legacy_lease_without_controller_identity",
     };
@@ -199,7 +202,7 @@ export async function evaluateNativeControllerTakeover(input: {
     return {
       allowed: true,
       reason:
-        owner.leaseExpiresAt <= now
+        owner.leaseExpiresAt !== null && owner.leaseExpiresAt <= now
           ? "expired_lease_controller_process_dead"
           : "controller_process_dead",
     };
@@ -625,11 +628,16 @@ export async function claimNativeRestartRecoveries(input: {
       const remoteWorkspace = readNativeWorkspaceSyncReference(
         profile.nativeWorkspaceSync,
       );
+      const [pluginTask] = await tx.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+        eq(environmentLeases.companyId, row.run.companyId), eq(environmentLeases.heartbeatRunId, row.run.id),
+        sql`${environmentLeases.metadata}->>'runnerTaskLease' = 'true'`,
+      )).limit(1);
       const remoteSandbox = profile.nativeWorkspaceSync != null;
+      const remoteProcess = remoteSandbox || !!pluginTask;
       const runnerPidAlive =
-        !remoteSandbox && processIsAlive(row.run.processPid);
+        !remoteProcess && processIsAlive(row.run.processPid);
       const runnerGroupAlive =
-        !remoteSandbox && processGroupIsAlive(row.run.processGroupId);
+        !remoteProcess && processGroupIsAlive(row.run.processGroupId);
       const observedRunnerStart =
         row.run.processPid && runnerPidAlive
           ? await observedProcessStart(row.run.processPid)
@@ -752,7 +760,7 @@ export async function claimNativeRestartRecoveries(input: {
         }
       }
       const providerProcesses = await evaluateNativeProviderProcesses({
-        identities: (remoteSandbox ? [] : providerProcessIdentities).filter(
+        identities: (remoteProcess ? [] : providerProcessIdentities).filter(
           (identity) => identity.pid !== row.run.processPid,
         ),
       });
@@ -854,6 +862,7 @@ export async function claimNativeRestartRecoveries(input: {
           recycledProviderPids: providerProcesses.recycledPids,
           stderrTail: row.run.stderrExcerpt,
         });
+        await notifyExecutionRunWork(tx);
         await tx
           .update(nativeRunFinalizations)
           .set({
@@ -894,7 +903,7 @@ export async function claimNativeRestartRecoveries(input: {
           })
           .where(eq(heartbeatRuns.id, row.run.id))
           .returning();
-        if (updatedRun && updatedRun.status !== row.run.status) {
+        if (updatedRun && isNewTerminalRunFailure(row.run, updatedRun)) {
           terminalRunToReport = updatedRun;
         }
         await tx

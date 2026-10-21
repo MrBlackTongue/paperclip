@@ -141,6 +141,11 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     cloudDefault: false,
     selfHostedDefault: false,
   },
+  enableMuse: {
+    title: "Muse — Personal agent",
+    description: "Connect your personal Meta Muse through its managed background receiver and the external Paperclip Runner. Experimental; requires authenticated public HTTPS and Paperclip Runner.",
+    tier: "managed", cloudDefault: false, selfHostedDefault: false,
+  },
   enableChatConnectors: {
     title: "Chat connectors",
     description:
@@ -156,19 +161,19 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     cloudDefault: false,
     selfHostedDefault: false,
   },
+  enablePaperclipNotebook: {
+    title: "Paperclip Notebook",
+    description: "Allow Paperclip Notebook connections and publishing through an explicitly enabled instance rollout.",
+    tier: "managed",
+    cloudDefault: false,
+    selfHostedDefault: false,
+  },
   enableMcpAggregators: {
     title: "MCP aggregators (compatibility)",
     description: "Deprecated compatibility key. MCP aggregators are always enabled; stored and managed values are ignored.",
     tier: "managed",
     cloudDefault: true,
     selfHostedDefault: true,
-  },
-  enablePipelines: {
-    title: "Pipelines",
-    description: "Enable pipeline definitions and pipeline-driven case production surfaces.",
-    tier: "managed",
-    cloudDefault: false,
-    selfHostedDefault: false,
   },
   enableCases: {
     title: "Cases",
@@ -283,7 +288,7 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
   enableFastResponses: {
     title: "Experimental fast responses",
     description:
-      "Show Connections in company settings and allow short acknowledgements while agents begin work.",
+      "Allow short acknowledgements while agents begin work. Configure them in Settings → Connections.",
     tier: "managed",
     cloudDefault: false,
     selfHostedDefault: false,

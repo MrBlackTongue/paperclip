@@ -73,6 +73,28 @@ export function readStopOnlyCleanup(lease: Lease) {
 /** Persist before provider dispatch so an older worker or a restart cannot turn
  * an explicit stop into ordinary destructive release. Invalid pins stay pending. */
 export async function prepareSandboxStopAndRetain(db: Db, lease: Lease) {
+  return prepareStopAndRetain(db, lease, "active");
+}
+
+/** Historical release rows can lack a stop receipt. Re-inspect the exact
+ * recorded allocation using stop-only dispatch; never infer that it stopped. */
+export async function prepareHistoricalSandboxStopVerification(db: Db, lease: typeof environmentLeases.$inferSelect) {
+  if (lease.status !== "released" || !lease.heartbeatRunId || !lease.providerLeaseId ||
+      !["retain_on_failure", "ephemeral"].includes(lease.leasePolicy) || lease.metadata?.pendingCleanupInFlight === true)
+    return null;
+  return prepareStopAndRetain(db, lease, "released");
+}
+
+/** A repair-only resume invalidates the old stop receipt atomically. This is
+ * separate from ordinary release; a released timestamp alone cannot grant it. */
+export async function prepareStoppedSandboxForRecovery(db: Db, lease: typeof environmentLeases.$inferSelect) {
+  if (!hasRemoteTerminationReceipt(lease) || lease.status !== "released"
+    || (lease.metadata?.remoteExecutionTermination as { state?: string })?.state !== "stopped"
+    || !["retain_on_failure", "ephemeral"].includes(lease.leasePolicy)) return null;
+  return prepareStopAndRetain(db, lease, "released");
+}
+
+async function prepareStopAndRetain(db: Db, lease: Lease, fromStatus: "active" | "released") {
   const requestId = randomUUID(), now = new Date();
   const intent = { schema: "paperclip.sandbox-stop-and-retain.v1", requestId,
     companyId: lease.companyId, runId: lease.heartbeatRunId, leaseId: lease.id,
@@ -87,7 +109,7 @@ export async function prepareSandboxStopAndRetain(db: Db, lease: Lease) {
       pendingCleanupRetryAfterMs: 0, pendingCleanupRetryAttempts: 0, pendingCleanupRetryCapWarned: false,
     })}::jsonb`,
   }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, lease.companyId),
-    eq(environmentLeases.heartbeatRunId, lease.heartbeatRunId!), eq(environmentLeases.status, "active"),
+    eq(environmentLeases.heartbeatRunId, lease.heartbeatRunId!), eq(environmentLeases.status, fromStatus),
     sql`${environmentLeases.provider} is not distinct from ${lease.provider}`,
     sql`${environmentLeases.providerLeaseId} is not distinct from ${lease.providerLeaseId}`,
     sql`${environmentLeases.metadata} is not distinct from ${lease.metadata === null ? null : JSON.stringify(lease.metadata)}::jsonb`,

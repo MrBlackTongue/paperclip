@@ -5,6 +5,12 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { publishWorkspaceSeedGeneration, readWorkspaceSeedGeneration } from "./workspace-seed-cache.js";
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 const roots: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllEnvs();
@@ -110,5 +116,50 @@ it("treats optional verification storage failure as a cache miss", async () => {
     companyDirectory: f.company, verify: async () => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); },
   })).toBe(false);
   expect(await fs.readdir(f.company)).toEqual([]);
+  expect(await fs.readFile(f.archive, "utf8")).toBe("run recovery bytes");
+});
+
+it("does not hold the company publication lock during slow verification", async () => {
+  const f = await fixture();
+  const entered = deferred<void>();
+  const release = deferred<boolean>();
+  const slow = publishWorkspaceSeedGeneration(f.workspace, generation(1), f.seed, {
+    companyDirectory: f.company, verify: () => { entered.resolve(); return release.promise; },
+  });
+  try {
+    await entered.promise;
+    expect(await publishWorkspaceSeedGeneration(path.join(f.company, "second"), generation(2), f.seed,
+      { companyDirectory: f.company })).toBe(true);
+    expect(await fs.readdir(f.company)).toEqual(["second"]);
+  } finally { release.resolve(true); await slow; }
+  expect(await readWorkspaceSeedGeneration(f.workspace, generation(1))).not.toBeNull();
+});
+
+it("rechecks aggregate capacity after concurrent verifications finish", async () => {
+  const f = await fixture();
+  const release = deferred<boolean>();
+  const entered = vi.fn(() => release.promise);
+  const publications = ["first", "second"].map((name, index) => publishWorkspaceSeedGeneration(
+    path.join(f.company, name), generation(index), f.seed,
+    { companyDirectory: f.company, limits: { companyGenerations: 1 }, verify: entered },
+  ));
+  try { await vi.waitFor(() => expect(entered).toHaveBeenCalledTimes(2)); }
+  finally { release.resolve(true); }
+  expect((await Promise.all(publications)).sort()).toEqual([false, true]);
+  expect(await fs.readdir(f.company)).toHaveLength(1);
+  expect(await fs.readFile(f.archive, "utf8")).toBe("run recovery bytes");
+});
+
+it("rejects a company directory replaced during verification", async () => {
+  const f = await fixture();
+  const replacement = path.join(f.root, "other-company"); await fs.mkdir(replacement);
+  expect(await publishWorkspaceSeedGeneration(f.workspace, generation(1), f.seed, {
+    companyDirectory: f.company, verify: async () => {
+      await fs.rename(f.company, `${f.company}-retained`);
+      await fs.symlink(replacement, f.company);
+      return true;
+    },
+  })).toBe(false);
+  expect(await fs.readdir(replacement)).toEqual([]);
   expect(await fs.readFile(f.archive, "utf8")).toBe("run recovery bytes");
 });

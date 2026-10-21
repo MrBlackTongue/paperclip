@@ -464,6 +464,7 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
   async function resolveCredentials(
     endpoint: EndpointRow,
     database: DbOrTransaction = db,
+    secretKeys?: readonly string[],
   ): Promise<Record<string, string>> {
     const connection = await database
       .select({ refs: toolConnections.credentialSecretRefs, config: toolConnections.config })
@@ -476,7 +477,10 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
       )
       .then((rows) => rows[0] ?? null);
     if (!connection) throw notFound("Chat connection not found");
-    const values = await resolveCredentialRefs(endpoint, connection.refs, database);
+    const refs = secretKeys
+      ? connection.refs.filter(ref => secretKeys.includes(ref.configPath.replace(/^credentials\./, "")))
+      : connection.refs;
+    const values = await resolveCredentialRefs(endpoint, refs, database);
     if (endpoint.provider === "imessage-photon") {
       const configuration = photonChannelConfigurationSchema.parse(connection.config.photon);
       return { ...values, ...configuration, lineId: configuration.allocation === "shared" ? photonSharedScope(configuration.projectId) : configuration.lineId };

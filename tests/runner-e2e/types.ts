@@ -5,6 +5,7 @@ export const CREDENTIAL_NAMES = [
   "KIMI_MODEL_API_KEY",
   "XAI_API_KEY",
   "GROK_AUTH_JSON",
+  "CODEX_AUTH_JSON",
   "GEMINI_API_KEY",
   "DAYTONA_API_KEY",
   "GITHUB_TOKEN",
@@ -17,7 +18,10 @@ export type RunnerGeneration = "legacy" | "native";
 export type RunnerEnvironmentId = "local" | "daytona";
 export type RunnerTaskWorkMode = "standard" | "planning" | "ask";
 export type RunnerTaskFlow =
+  | "case_handoff"
   | "task_workspaces"
+  | "automatic_repository"
+  | "repository_verification"
   | "repository_skills"
   | "provider_connection"
   | "plan_task_guidance"
@@ -158,6 +162,8 @@ export interface RunnerTaskFixture {
   attemptTimeoutMs: Readonly<Record<RunnerEnvironmentId, number>>;
   expectedTerminalState: {
     issue: "done" | "in_review" | "blocked" | "in_progress";
+    /** Only the Copilot denial flow admits this with a verified recovery settlement. */
+    alternativeIssue?: "blocked";
     run: "succeeded" | "failed" | "cancelled";
   };
   buildTitle(nonce: string): string;
@@ -308,6 +314,8 @@ export interface RunnerE2EResult {
   issueId?: string;
   issueIdentifier?: string | null;
   runIds?: string[];
+  latencyProbes?: import("./latency-timing.js").LatencyResult[];
+  startupReuse?: Array<{ runId: string } & import("../../packages/adapter-utils/src/startup-reuse.js").StartupReuseSummary>;
   turnTimings?: Array<{
     turn: number;
     submittedAt: string;

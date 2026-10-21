@@ -130,6 +130,34 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     expect(result.requestedReusableExecutionWorkspaceConfig).toBeNull();
   });
 
+  it.each(["muse", "openai_dot", "grok_bot"] as const)("keeps %s managed placement without adopting the task's selected workspace", async provider => {
+    const { input, issue, workspace } = await fixture();
+    const source = await workspace();
+    const [sandbox] = await db.insert(environments).values({ name: `External controller ${provider}`, driver: "sandbox", status: "active", config: { provider: "fake" } }).returning();
+    input.agent.adapterType = "paperclip_runner";
+    input.agent.adapterConfig = { provider };
+    input.agent.defaultEnvironmentId = sandbox.id;
+    input.task.issueRef!.executionWorkspaceId = source.id;
+    input.task.issueRef!.projectWorkspaceId = randomUUID();
+    input.task.boundSourceWorkspace = source;
+    input.task.workspaceProjectContext = { hasWorkspace: true };
+    input.task.hasSelectedWorkspaceSource = true;
+    input.task.taskWorkspaceIntent = { version: 1, source: "explicit", selection: { kind: "task_directory" } };
+    await db.update(issues).set({ originKind: "chat_channel" }).where(eq(issues.id, issue.id));
+    const read = vi.spyOn(input.services.executionWorkspacesSvc, "getStoredById").mockRejectedValue(new Error("Task source must remain inaccessible"));
+    const select = vi.spyOn(input.services.executionWorkspacesSvc, "validateStoredSelectionForRun").mockRejectedValue(new Error("Task selection must remain inaccessible"));
+    try {
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(result).toMatchObject({ isDotRun: true, selectedEnvironmentId: sandbox.id,
+        existingExecutionWorkspace: null, reusableExistingExecutionWorkspace: null,
+        nativeChatWorkspaceScope: null, useIsolatedTaskDirectory: false, explicitTaskDirectory: false });
+      expect(read).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      expect(input.services.findSharedWorkspaceHolder).not.toHaveBeenCalled();
+      expect(input.task.issueRef!.executionWorkspaceId).toBe(source.id);
+    } finally { read.mockRestore(); select.mockRestore(); }
+  });
+
   it("uses the low-trust task sandbox even when workspace feature gates hide issue settings", async () => {
     const { input, issue } = await fixture();
     const [sandbox] = await db.insert(environments).values({ name: "Task sandbox", driver: "sandbox", status: "active", config: { provider: "fake" } }).returning();

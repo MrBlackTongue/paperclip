@@ -88,10 +88,11 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enablePublicMcp: false,
     enableOpenAiDot: false,
     enableGrokBot: false,
+    enableMuse: false,
     enableChatConnectors: false,
     enableGitHubReviewBots: false,
     enableMemoryConnectors: false,
-    enablePipelines: false,
+    enablePaperclipNotebook: false,
     enableCases: false,
     enableAgentChat: false,
     enableCombinedInboxTasks: false,
@@ -273,6 +274,17 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     }
   });
 
+  it("saves the personal Muse opt-in separately and names independent readiness evidence", async () => {
+    await renderPage();
+    expect(container.textContent).toContain("Muse — Personal agent");
+    expect(container.textContent).toContain("independent background reply");
+    expect(container.textContent).toContain("Provider usage and cost are unavailable");
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Toggle Muse experimental setting"]')!;
+    await act(() => toggle.click());
+    await flushReact();
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenLastCalledWith({ enableMuse: true });
+  });
+
   it("names Dot prerequisites and saves its opt-in independently in both directions", async () => {
     await renderPage();
     const selector = 'button[aria-label="Toggle OpenAI Dot experimental setting"]';
@@ -382,7 +394,7 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
     await renderPage();
 
     expect(container.textContent).toContain("Paperclip Runner");
-    expect(container.textContent).toContain("Onboarding continues to use legacy adapters");
+    expect(container.textContent).toContain("First-run setup offers qualified GitHub Copilot");
     const toggle = container.querySelector<HTMLButtonElement>(
       PAPERCLIP_RUNNER_TOGGLE_SELECTOR,
     );
@@ -1134,6 +1146,20 @@ describe("InstanceExperimentalSettings — operator-hidden cards", () => {
     expect(container.textContent).toContain("Experimental features");
     expect(container.textContent).not.toContain("AI connection routers");
     expect(container.querySelector('button[aria-label="Toggle AI connection routers experimental setting"]')).toBeNull();
+    expect(mockInstanceSettingsApi.updateExperimental).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { enabled: false, developerMode: false }, { enabled: true, developerMode: false },
+    { enabled: false, developerMode: true }, { enabled: true, developerMode: true },
+  ])("never offers a Notebook control with enabled=$enabled and developerMode=$developerMode", async ({ enabled, developerMode }) => {
+    await renderPage(undefined, { ...defaultExperimentalSettings(), enablePaperclipNotebook: enabled,
+      enablePaperclipDeveloperMode: developerMode,
+      managedKeys: { enablePaperclipNotebook: { managed: true, managedBy: "paperclip-cloud" } },
+    });
+    expect(container.textContent).toContain("Experimental features");
+    expect(container.textContent).not.toContain("Paperclip Notebook");
+    expect(container.querySelector('button[aria-label="Toggle Paperclip Notebook experimental setting"]')).toBeNull();
     expect(mockInstanceSettingsApi.updateExperimental).not.toHaveBeenCalled();
   });
 

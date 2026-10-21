@@ -9,25 +9,35 @@ continuation is available. Recovery retains task context and ownership, honors
 pause and budget gates, and distinguishes confirmed failure from an uncertain
 external outcome. A retry acknowledgement alone is not proof that work resumed.
 
+Feature ID: `recovery`.
+
 Agent access: [companion](../agent-access-map/recovery.md).
 
 ## Sub-features
 
-- `diagnosis`: a task/run exposes the recorded cause, evidence, owner, attempt
+- `diagnosis`: `recovery/diagnosis` — a task/run exposes the recorded cause, evidence, owner, attempt
   progress, and next action without requiring a raw-log interpretation.
-- `bounded-continuation`: supported interrupted work continues with preserved
+- `bounded-continuation`: `recovery/bounded-continuation` — supported interrupted work continues with preserved
   conversation context and bounded attempts, without blindly replaying tools.
-- `source-action`: source-scoped recovery actions remain attached to the task;
+- `source-action`: `recovery/source-action` — source-scoped recovery actions remain attached to the task;
   independent repair work may have its own issue and return owner.
-- `exhaustion`: exhausted or overdue recovery exposes the current gate and
-  permitted operator action; it does not claim an automatic path is still live.
-- `workspace`: workspace divergence/export failures show the applicable repair,
+- `exhaustion`: `recovery/exhaustion` — an exhausted infrastructure attempt offers ordinary Retry.
+  Internal repair stays system-owned; genuine user decisions retain their
+  specific action.
+- `workspace`: `recovery/workspace` — workspace divergence/export failures show the applicable repair,
   reconcile, or isolated reissue action with evidence and authority checks.
-- `unknown-outcome`: uncertain external side effects require inspection and
+  Retained-file recovery runs in the harness with observed task progress and a
+  ordinary Retry action after exhaustion or during backoff. It preserves newer files,
+  keeps uncertain sources held, and delivers saved human input through ordinary
+  admission. The task does not expose infrastructure-certification forms or a
+  workspace link when the destination is disabled. Local PostgreSQL and real
+  filesystem regressions cover native and legacy recovery and one-time delivery;
+  hosted provider recovery remains separate acceptance.
+- `unknown-outcome`: `recovery/unknown-outcome` — uncertain external side effects require inspection and
   an explicit decision, not automatic replay.
-- `user-continuation`: saved user messages after a stop are reconsidered once
+- `user-continuation`: `recovery/user-continuation` — saved user messages after a stop are reconsidered once
   cleanup proves the old execution is stopped; duplicate wakes are avoided.
-- `reconnect`: browser stream recovery refreshes persisted state without claiming
+- `reconnect`: `recovery/reconnect` — browser stream recovery refreshes persisted state without claiming
   the agent itself restarted or that a failed run succeeded.
 
 ## How to get to it (user POV)
@@ -35,15 +45,13 @@ Agent access: [companion](../agent-access-map/recovery.md).
 ### `source-task`
 
 Open the affected task from Tasks, Inbox/Blocked, search, or a direct task link.
-Inspect the recovery notice/card in its history, expand details if needed, and
-use the currently offered action. Follow any linked repair task and return owner.
+Observe one working, backoff, failed or waiting-for-user state. Use Retry after
+an infrastructure failure. No process or file certification is required.
 
-An authorized board user can expand Recovery details on a stopped-run notice to
-read the decision that still blocks replay, including a settled recovery record.
-The notice matches the current action and run; it does not show another run's
-historical decision or authorize a retry. Source-reviewed behavior; the
-[notice regressions](../../ui/src/components/ExecutionBlockerNotice.test.tsx)
-cover empty active recovery, a mismatched source, and failed history reads.
+Thinking appears immediately after Retry, before the request completes.
+Technical source/run details remain in deliberate diagnostics. The
+[task recovery contract](../../doc/task-recovery.md) describes receipt identity,
+fresh workspaces, bounded retries, historical adoption and service incidents.
 
 ### `run-detail`
 
@@ -55,15 +63,25 @@ stopped-run recovery checks.
 
 ### `operator-retry`
 
-On an exhausted disposition or workspace recovery card, inspect the current
-reason and use the permitted retry/repair/reconcile action. Some repairs require
-confirmation; unavailable actions must explain the gate or remain absent.
+Use the task's Retry action. It can create an isolated attempt after old execution
+is contained even when old-file preservation remains unresolved. Approval,
+credentials, budget and deliberate pause use their existing specific controls.
 
 ### `post-stop-message`
 
 After a stop, send a new instruction on the same task or inspect one already
 saved while cleanup was pending. Observe the waiting message, continuation, and
 eventual result rather than manually changing the task status to look complete.
+
+A continuation denied before startup by an existing execution hold remains a
+wait. Once the original hold clears, the server verifies the dispatch receipt
+and absence of execution evidence, ignores any historical false incident for
+that unused admission, and reconsiders saved input through normal admission.
+No infrastructure-certification form is needed. The
+[database regressions](../../server/src/__tests__/heartbeat-undispatched-execution-wait.test.ts)
+cover incident prevention, retained audit history, concurrent restart admission,
+ordered messages, contradictory execution evidence, and unchanged pause and
+task gates. These tests do not qualify a live provider or prove task completion.
 
 ### `browser-reconnect`
 
@@ -78,6 +96,21 @@ Use a disposable instance and reproducible failure. Record source task/run,
 adapter/runtime mode, cause, attempt count, current owner, and verified stop
 evidence. Do not kill an unrelated server or induce provider side effects just
 to get a failure screen. Use the existing deterministic recovery suite first.
+
+**Operation checkpoints**
+
+Use these checks alongside the entry-point recipes below and the operation records in the [access companion](../agent-access-map/recovery.md). Record the actual actor, surface, saved result and denial separately. Source review and linked tests do not establish a live pass.
+
+| Capability ID | Action and persisted result | Denial, race and retry checks |
+| --- | --- | --- |
+| `recovery/diagnosis` | Open the source task and exact run; compare cause, source action, original owner, recovery owner, attempt bounds and next action after reload. | Test an unrelated/private task and a stale run notice. Read-side retirement of a stale action must not create a new attempt, participant, or permission to replay. |
+| `recovery/bounded-continuation` | Use a deterministic recoverable interruption and inspect the original run/session, attempt receipts, saved result and eventual useful output. | Repeat restart/receipt delivery, race Stop or a new owner, and retain unknown external outcomes. Accepted completion/finalization recovery must not start a new provider turn or repeat its side effect. |
+| `recovery/source-action` | Inspect active and retained actions, follow the repair owner, and resolve one eligible source-bound action with its exact ID. | Retry the settled resolution and reject a stale/foreign action. Recovery ownership alone cannot mutate the source task; inspect source status, audit and wake independently. |
+| `recovery/exhaustion` | Exhaust or age a bounded fixture; use the currently offered retry once, then inspect its durable acknowledgement and actual continuation. | Reassign, pause, stop, close, add an unresolved dependency, or impose a budget hold before retry. The old notice must not reopen terminal work or run the wrong owner. |
+| `recovery/workspace` | Exercise retained-file recovery, export retry, reconstruction, branch repair/reconciliation and exact-owner finalization as distinct authorized operator paths. | Use exact source/action/run/receipt bindings and preserve existing files. Reject stale source, live/uncertain writers, unsafe archives and insufficient authority. Verify actual files and accepted result separately from queued acknowledgement. |
+| `recovery/unknown-outcome` | Inspect the provider and saved intent before recording a source-specific chat, email or governed-provider outcome. | Use performed, not-performed and unresolved cases. Wrong company/request, stale state and unauthorized resolution must fail. Unknown effects must not replay automatically. An explicit retry must record the operator’s duplicate-risk acceptance and dispatch only the authorized attempt. |
+| `recovery/user-continuation` | Save a distinguishable instruction while Stop cleanup is pending; after verified stop, inspect exactly one eligible continuation and its useful response. | Keep the message waiting under task/ancestor pause, budget or retained-file holds. Do not impersonate a human message or infer delivery from a queued wake. |
+| `recovery/reconnect` | Disconnect the browser, let the server change persisted task/run state, reconnect, then reload and compare. | Inspect duplicate comments/decisions and private/company boundaries after access changes. Browser transport recovery and agent execution recovery require separate results. |
 
 ### `source-task`
 
@@ -109,6 +142,21 @@ workspace references. These cases prove classification, not a live remote
 provider restart. For that journey, interrupt a disposable deployment after
 workspace preparation and before its first executor claim, then confirm one
 provider turn starts on the original run through the normal admission gates.
+
+Active remote process supervision distinguishes a failed health read from a
+confirmed exit. The [executor tests](../../server/src/services/native-runtime/native-session-executor.test.ts)
+exercise timeout recovery with a real listening process, unchanged ownership,
+and rejected identity evidence. The Runner restart tests require positive exit
+evidence before replacement. This coverage does not prove recovery of a
+historical retained sandbox or behavior during a live provider outage.
+
+For completion recovery, restart after a native completion proposal is appended
+but before its session checkpoint. Verify that the original result is finalized
+after provider termination, with no new provider turn or repeated external action.
+The [runtime regressions](../../packages/paperclip-runner/src/native-session-runtime.test.ts)
+exercise the real Codex driver with a simulated transport, including a still-active
+provider and invalid, conflicting, duplicate, or stale proposals. This does not
+qualify a hosted sandbox restart.
 
 The same database suite pauses an original preparation while recovery claims
 the remote run. It then verifies that the old preparation yields without opening
@@ -160,17 +208,27 @@ The recovery-card suite covers workspace divergence, reissue, reconcile, and
 confirmation. [Workspace export](../../ui/src/components/WorkspaceExportRecovery.test.tsx)
 covers quiet restoration, legacy/operator assistance and resolved states.
 
-For a retained legacy file hold, open the source task after its recovery action
-has resolved but its files still need recovery. An authorized board operator can
-record the verified recovered files and backup link without changing the current
-task status or starting another run. The server must independently validate the
-original stopped-execution receipt. Agent Chat must show the file hold rather than
-suggesting another message. The [file recovery form](../../ui/src/components/WorkspaceFileRecovery.test.tsx),
-[notice](../../ui/src/components/ExecutionBlockerNotice.test.tsx), and
+For a retained legacy or native file hold, open the source task after its recovery
+action has resolved but its files still need recovery. The shared task projection
+shows actual working/backoff state or ordinary Retry. It does not show a separate
+infrastructure attention card. Unknown external outcomes remain fenced internally.
+An authorized board operator can use the resolution API to record verified files
+and a backup link without changing task status or starting another run. The
+server independently validates the original stopped-execution receipt. Agent
+Chat retains the hold rather than suggesting another message. The
+[notice](../../ui/src/components/ExecutionBlockerNotice.test.tsx) and
 [repair route](../../server/src/__tests__/workspace-restore-repair-route.test.ts)
-cover evidence/confirmation, read-only access, stale or missing stop proof,
+cover quiet live recovery, read-only access, stale or missing stop proof,
 source-only repair, and preserved task status. These tests use fixtures; separately
 verify original files and their attached artifact before recording a real repair.
+
+For a source with a retained-file protection marker, exercise recovery through
+the assembled environment runtime. Its exact preservation owner may reopen the
+stopped allocation to read saved files; ordinary resume stays blocked. Reject a
+changed claim, missing stop intent, wrong lease or wrong environment before a
+provider call. Verify saved and newer local files, one preservation receipt, and
+no additional agent turn. The PostgreSQL regression covers this boundary; the
+opt-in provider probe also uses this runtime path with the protection marker.
 
 Repeat source-only repair with a `succeeded` legacy run that still has a retained
 file obligation. Its result must remain successful, its current task owner and
@@ -200,6 +258,20 @@ explicit rejection. Reload to confirm the durable outcome. For a workspace
 repair, record the compared branches/revisions and preserve uncommitted work;
 confirm the repair's actual result before resuming. Check the denied and stale
 action paths. A changed card label is insufficient proof of workspace integrity.
+
+For graceful legacy shutdown, interrupt a disposable sandbox run while file
+export is in flight. Delay settlement past the first 30-second wait. Confirm
+the lease stays available, no repair hold or successor appears before export,
+and the finalizer drain waits for the same owner. After export, confirm saved
+files, successful lease cleanup, and one bounded continuation. Reload before
+checking the successor. Repeat with controller loss: the expired fence must
+retain the exact source and require repair, never claim restored files or start
+a second executor. The database-backed
+[shutdown regression](../../server/src/__tests__/heartbeat-process-recovery.test.ts)
+checks finalizer joining, release order, durable retry uniqueness, and reload.
+The [settlement regressions](../../server/src/services/heartbeat/recovery.test.ts)
+cover other-controller fencing and owner loss. Provider boundaries are controlled
+in these tests; they do not qualify a live sandbox export.
 
 For an abandoned native controller, follow the [stop-verification procedure](../../doc/native-workspace-finalization-recovery.md)
 with a disposable deployment. A new platform-bound owner recovers automatically
@@ -262,6 +334,8 @@ only. Separately inspect the underlying execution if it is still stuck.
 
 #### `exhaustion`
 
+Capability ID: `recovery/exhaustion`.
+
 Scope: ui
 Storybook: Exhausted/overdue attempts, operator retry pending/error, blocked authority/gate and specific escalation.
 Production: Inspect durable attempt bounds and actual eligible retry/repair; acknowledgment alone does not prove continued execution.
@@ -269,12 +343,16 @@ Sources: Source: [IssueRecoveryActionCard.tsx](../../ui/src/components/IssueReco
 
 #### `unknown-outcome`
 
+Capability ID: `recovery/unknown-outcome`.
+
 Scope: ui
 Storybook: Uncertain external outcome, required inspection/evidence and explicit permitted operator decision.
 Production: Corroborate provider outcome before authorization; enforce no automatic external side-effect replay and reject stale/unauthorized decisions.
 Sources: Source: [IssueRecoveryActionCard.tsx](../../ui/src/components/IssueRecoveryActionCard.tsx), [issue-recovery-actions.ts](../../server/src/services/issue-recovery-actions.ts). Tests: [IssueRecoveryActionCard.test.tsx](../../ui/src/components/IssueRecoveryActionCard.test.tsx), [issue-recovery-actions.test.ts](../../server/src/__tests__/issue-recovery-actions.test.ts), [recovery.spec.ts](../../tests/e2e/execution-recovery/recovery.spec.ts)
 
 #### `user-continuation`
+
+Capability ID: `recovery/user-continuation`.
 
 Scope: ui
 Storybook: Saved follow-up waiting on stop cleanup, pause/budget gate, one eligible continuation and result/failure.

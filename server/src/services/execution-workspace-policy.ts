@@ -130,6 +130,7 @@ export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecu
   })();
   return {
     enabled,
+    ...(typeof parsed.storageProviderPluginId === "string" ? { storageProviderPluginId: parsed.storageProviderPluginId } : {}),
     ...(sharedWorkspaceConcurrency ? { sharedWorkspaceConcurrency } : {}),
     ...(normalizedDefaultMode ? { defaultMode: normalizedDefaultMode } : {}),
     ...(allowIssueOverride !== undefined ? { allowIssueOverride } : {}),
@@ -402,7 +403,9 @@ export function parseIssueAssigneeAdapterOverrides(
   raw: unknown,
 ): ParsedIssueAssigneeAdapterOverrides | null {
   const parsed = parseObject(raw);
-  const parsedAdapterConfig = parseObject(parsed.adapterConfig);
+  const parsedAdapterConfig = Object.fromEntries(
+    Object.entries(parseObject(parsed.adapterConfig)).filter(([key]) => key !== "homeMode"),
+  );
   const adapterConfig =
     Object.keys(parsedAdapterConfig).length > 0 ? parsedAdapterConfig : null;
   const useProjectWorkspace =

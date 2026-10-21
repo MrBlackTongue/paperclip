@@ -322,6 +322,36 @@ describeEmbeddedPostgres("heartbeat run privacy routes", { concurrent: false }, 
     }
   });
 
+  it("filters private task links from a readable company run while preserving authorized links", async () => {
+    const fixture = await seedFixture();
+    const publicIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: publicIssueId, companyId: fixture.companyId, identifier: "RPR-2",
+      title: "Public follow-up", visibility: "open", status: "todo",
+    });
+    await db.insert(activityLog).values([fixture.issueId, publicIssueId].map(entityId => ({
+      companyId: fixture.companyId, runId: fixture.maintenanceRunId,
+      agentId: fixture.ownerAgentId, actorType: "agent", actorId: fixture.ownerAgentId,
+      action: "issue.comment_added", entityType: "issue", entityId,
+    })));
+
+    const outsider = await request(createApp(fixture.companyId, fixture.otherAgentId))
+      .get(`/api/heartbeat-runs/${fixture.maintenanceRunId}/issues`);
+    expect(outsider.status).toBe(200);
+    expect(outsider.body).toEqual([expect.objectContaining({ issueId: publicIssueId, title: "Public follow-up" })]);
+    expect(JSON.stringify(outsider.body)).not.toContain(fixture.issueId);
+    expect(JSON.stringify(outsider.body)).not.toContain("Confidential email triage");
+    expect(JSON.stringify(outsider.body)).not.toContain("RPR-1");
+
+    for (const agentId of [fixture.ownerAgentId, fixture.grantedAgentId]) {
+      const response = await request(createApp(fixture.companyId, agentId))
+        .get(`/api/heartbeat-runs/${fixture.maintenanceRunId}/issues`);
+      expect(response.status).toBe(200);
+      expect(response.body.map((row: { issueId: string }) => row.issueId).sort())
+        .toEqual([fixture.issueId, publicIssueId].sort());
+    }
+  });
+
   it("filters credential diagnostics in full-run and history responses by viewer", async () => {
     const fixture = await seedFixture();
     const readerId = `reader-${randomUUID()}`;

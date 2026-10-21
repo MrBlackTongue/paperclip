@@ -712,7 +712,7 @@ describe("agent routes adapter validation", () => {
     expect(mockAgentService.create).not.toHaveBeenCalled();
   });
 
-  it("rechecks selection policy when a saved native adapter switches its underlying harness", async () => {
+  it("rechecks selection policy when a saved native adapter switches to an experimentally gated harness", async () => {
     mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig: { provider: "codex" } });
     mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: false });
     const probe = vi.fn();
@@ -722,7 +722,7 @@ describe("agent routes adapter validation", () => {
       const app = await createApp();
       const res = await requestApp(app, baseUrl => request(baseUrl)
         .post("/api/companies/company-1/adapters/paperclip_runner/test-environment")
-        .send({ agentId: "11111111-1111-4111-8111-111111111111", adapterConfig: { provider: "acpx", acpxAgent: "claude" } }));
+        .send({ agentId: "11111111-1111-4111-8111-111111111111", adapterConfig: { provider: "acpx", acpxAgent: "pi" } }));
       expect(res.status, JSON.stringify(res.body)).toBe(422);
       expect(res.body.details).toMatchObject({ code: "paperclip_runner_rollout_disabled" });
       expect(probe).not.toHaveBeenCalled();
@@ -762,9 +762,9 @@ describe("agent routes adapter validation", () => {
     expect(mockAgentService.create).not.toHaveBeenCalled();
   });
 
-  it("keeps non-Codex native provider selection behind its existing flag", async () => {
+  it("keeps other native provider selection behind its existing flag", async () => {
     const app = await createApp();
-    const response = await requestApp(app, baseUrl => request(baseUrl).post("/api/companies/company-1/agents").send({ name: "Native Claude", adapterType: "paperclip_runner", adapterConfig: { provider: "acpx", acpxAgent: "claude", model: "claude-sonnet-5" } }));
+    const response = await requestApp(app, baseUrl => request(baseUrl).post("/api/companies/company-1/agents").send({ name: "Native OpenCode", adapterType: "paperclip_runner", adapterConfig: { provider: "opencode", model: "openrouter/deepseek/deepseek-v4-flash-0731" } }));
     expect(response.status).toBe(422);
     expect(response.body.details).toMatchObject({ code: "paperclip_runner_rollout_disabled" });
   });
@@ -808,11 +808,60 @@ describe("agent routes adapter validation", () => {
     );
   });
 
-  it.each(["dotAttachmentAccess", "dotWorkspaceAccess", "dotBindingId"])("refuses an agent granting itself the operator-owned Dot setting %s", async key => {
+  it.each(["dotAttachmentAccess", "dotWorkspaceAccess", "dotBindingId", "homeMode"])("refuses an agent granting itself the operator-owned setting %s", async key => {
     const app = await createApp({ type: "agent", agentId: "11111111-1111-4111-8111-111111111111", companyId: "company-1", source: "agent_jwt" });
-    const response = await requestApp(app, baseUrl => request(baseUrl).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ adapterConfig: { [key]: key === "dotBindingId" ? "another-binding" : true } }));
+    const response = await requestApp(app, baseUrl => request(baseUrl).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ adapterConfig: { [key]: key === "homeMode" ? "preconfigured" : key === "dotBindingId" ? "another-binding" : true } }));
     expect(response.status, JSON.stringify(response.body)).toBe(403);
     expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+  it.each(["create", "hire"])("refuses agent-authenticated homeMode on %s even with agent-management permission", async mode => {
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), permissions: { canCreateAgents: true } });
+    const app = await createApp({ type: "agent", agentId: "11111111-1111-4111-8111-111111111111", companyId: "company-1", source: "agent_jwt" });
+    const response = await requestApp(app, baseUrl => request(baseUrl).post(mode === "create" ? "/api/companies/company-1/agents" : "/api/companies/company-1/agent-hires")
+      .send({ name: "Runner", role: "engineer", adapterType: "paperclip_runner", adapterConfig: { homeMode: "preconfigured" } }));
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(response.body.error).toContain("Only an operator can configure Runner homeMode");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+  });
+  it.each(["replace", "adapter change", "rollback"])("refuses agent removal of operator homeMode through %s", async mode => {
+    mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: true });
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner",
+      adapterConfig: { provider: "codex", model: "gpt-6.1-sol", homeMode: "preconfigured" }, permissions: { canCreateAgents: true } });
+    mockAgentService.getConfigRevision.mockResolvedValue({ afterConfig: {
+      adapterType: "paperclip_runner", adapterConfig: { provider: "codex", model: "gpt-6.1-sol" },
+    } });
+    const app = await createApp({ type: "agent", agentId: "11111111-1111-4111-8111-111111111111", companyId: "company-1", source: "agent_jwt" });
+    const response = await requestApp(app, baseUrl => mode === "rollback"
+      ? request(baseUrl).post("/api/agents/11111111-1111-4111-8111-111111111111/config-revisions/33333333-3333-4333-8333-333333333333/rollback").send({})
+      : request(baseUrl).patch("/api/agents/11111111-1111-4111-8111-111111111111").send(mode === "replace"
+        ? { replaceAdapterConfig: true, adapterConfig: { provider: "codex", model: "gpt-6.1-sol" } }
+        : { adapterType: "claude_local" }));
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(response.body.error).toContain("Only an operator can configure Runner homeMode");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+  });
+  it.each(["agent", "board"] as const)("allows %s ordinary config updates while keeping homeMode operator-owned", async actor => {
+    mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: true });
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner",
+      adapterConfig: { provider: "codex", model: "gpt-6.1-sol", homeMode: "preconfigured" }, permissions: { canCreateAgents: true } });
+    const app = actor === "agent"
+      ? await createApp({ type: "agent", agentId: "11111111-1111-4111-8111-111111111111", companyId: "company-1", source: "agent_jwt" })
+      : await createApp();
+    const response = await requestApp(app, baseUrl => request(baseUrl).patch("/api/agents/11111111-1111-4111-8111-111111111111")
+      .send({ adapterConfig: { provider: "codex", model: "gpt-6.1-sol" }, replaceAdapterConfig: actor === "board" }));
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const saved = mockAgentService.update.mock.calls.at(-1)?.[1].adapterConfig;
+    expect(saved.homeMode).toBe(actor === "agent" ? "preconfigured" : undefined);
+  });
+  it("allows an operator to configure Runner homeMode", async () => {
+    mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: true });
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig: { provider: "codex", model: "gpt-6.1-sol" } });
+    const app = await createApp();
+    const response = await requestApp(app, baseUrl => request(baseUrl).patch("/api/agents/11111111-1111-4111-8111-111111111111")
+      .send({ adapterConfig: { homeMode: "preconfigured" } }));
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ adapterConfig: expect.objectContaining({ homeMode: "preconfigured" }) }), expect.anything());
   });
   it("allows an operator to configure Dot attachment access separately", async () => {
     const app = await createApp();

@@ -79,12 +79,18 @@ export interface Config {
   databaseBackupIntervalMinutes: number;
   databaseBackupRetentionDays: number;
   databaseBackupDir: string;
+  gitCacheExpirationEnabled: boolean;
+  gitBaseExpirationEnabled: boolean;
+  gitCacheExpirationDryRun: boolean;
   workspaceReaperCooldownDays: number;
   workspaceCompactionDelayHours: number | null;
   skillVersionRetentionEnabled: boolean;
   skillVersionRetentionDryRun: boolean;
   skillVersionRetentionKeepNewest: number;
   skillVersionRetentionGraceMinutes: number;
+  nativeHarnessBackupExpirationEnabled: boolean;
+  nativeHarnessBackupExpirationDryRun: boolean;
+  nativeHarnessBackupExpirationDays: number;
   serveUi: boolean;
   uiDevMiddleware: boolean;
   secretsProvider: SecretProvider;
@@ -330,6 +336,7 @@ export function loadConfig(): Config {
   };
   const skillVersionRetentionKeepNewest = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_KEEP", 0);
   const skillVersionRetentionGraceMinutes = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES", 60);
+  const nativeHarnessBackupExpirationDays = Math.max(1, nonNegativeIntegerEnv("PAPERCLIP_NATIVE_HARNESS_BACKUP_EXPIRATION_DAYS", 7));
   const bindValidationErrors = validateConfiguredBindMode({
     deploymentMode,
     deploymentExposure,
@@ -375,12 +382,18 @@ export function loadConfig(): Config {
     databaseBackupIntervalMinutes,
     databaseBackupRetentionDays,
     databaseBackupDir,
+    gitCacheExpirationEnabled: process.env.PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED === "true",
+    gitBaseExpirationEnabled: process.env.PAPERCLIP_GIT_BASE_EXPIRATION_ENABLED === "true",
+    gitCacheExpirationDryRun: process.env.PAPERCLIP_GIT_CACHE_EXPIRATION_DRY_RUN !== "false",
     workspaceReaperCooldownDays,
     workspaceCompactionDelayHours,
     skillVersionRetentionEnabled: process.env.PAPERCLIP_SKILL_VERSION_RETENTION_ENABLED !== "false",
     skillVersionRetentionDryRun: process.env.PAPERCLIP_SKILL_VERSION_RETENTION_DRY_RUN === "true",
     skillVersionRetentionKeepNewest,
     skillVersionRetentionGraceMinutes,
+    nativeHarnessBackupExpirationEnabled: process.env.PAPERCLIP_NATIVE_HARNESS_BACKUP_EXPIRATION_ENABLED !== "false",
+    nativeHarnessBackupExpirationDryRun: process.env.PAPERCLIP_NATIVE_HARNESS_BACKUP_EXPIRATION_DRY_RUN === "true",
+    nativeHarnessBackupExpirationDays,
     serveUi:
       process.env.SERVE_UI !== undefined
         ? process.env.SERVE_UI === "true"

@@ -35,6 +35,52 @@ maintains as a dependency; once you install the packages below, they become
 normal dependencies of **your own** project, and your own Dependabot updates
 them.
 
+## Budget admission, accounting, and enforcement
+
+The operator-gated `paperclip.budgets` tracer records
+`budget.admission.evaluate`, `budget.admission.reserve`,
+`budget.accounting.transaction`, `budget.accounting.settlement`, `budget.accounting.lock_wait`,
+`budget.exposure.evaluate`, `budget.enforcement.deliver`,
+`budget.enforcement.scope`, `budget.cancellation.deliver`, and `budget.accounting.recover`.
+Transaction spans include commit time. Lock-wait spans cover acquisition of the
+company accounting lock. Settlement spans cover the ledger and reservation
+transaction. Enforcement spans measure asynchronous delivery; cancellation
+delivery spans start after acquiring a concurrency slot and cover the external
+Stop attempt. Both remain separate from provider inference.
+
+The closed attribute list is `budget.policy_count` (number of applicable
+policies) and `budget.enforcement.queue_delay_ms` (time since the pending policy's
+last intent or retry timestamp). These spans contain no tool content, usage
+receipt bodies, credentials, or provider error bodies. They do not change
+Paperclip's separate first-party Telemetry contract.
+
+## Slack receipt reactions
+
+Slack stages its eyes reaction in the same transaction as the authorized task,
+comment, message link and wakeup intent. Transport starts after that commit,
+independently of attachment preparation, thread subscription and scheduler
+acceptance. Eyes acknowledge durable receipt; they do not certify agent startup.
+The existing action worker retains retries, credential fencing and exact-source
+cleanup when the final response is published.
+
+The Slack adapter also skips the SDK's two-second polling wait for optional link
+unfurls before message dispatch. Text, formatted content, link URLs and file
+download handles remain available. Paperclip does not consume that optional
+preview metadata for task admission.
+
+With an operator OTLP endpoint, the `paperclip.chat` tracer records
+`chat.slack.receipt` around each Slack reaction API attempt. Its closed attributes
+are `paperclip.chat.receipt.operation` (`add` or `remove`),
+`paperclip.chat.receipt.outcome` (`confirmed` or `failed`),
+`paperclip.chat.receipt.queue_ms` (action creation to transport), and
+`paperclip.chat.receipt.delivery_age_ms` (durable inbound receipt to provider
+confirmation or failure). `already_reacted` confirms an idempotent add.
+Delivery age excludes Slack-to-webhook transit and SDK parsing; the span duration
+measures provider I/O. A failed attempt is not an acknowledgement latency sample.
+No content, identifiers, credentials, URLs or exception text are added.
+Without the endpoint this instrumentation does no tracer lookup. Tracer errors
+cannot change reaction transport or settlement.
+
 ## Task detail loading
 
 `GET /api/issues/:id` returns `Server-Timing` with `paperclip_issue` for the
@@ -215,6 +261,14 @@ preparation, execution and settlement spans. They are controller work, not model
 turn time, and carry only the existing run hash. Nested phases overlap their
 containing backend or lifecycle intervals; do not add both durations.
 
+Before provider dispatch, `execution.usage_startup` measures durable usage-recorder
+initialization. `execution.mcp_handoff` measures native MCP server resolution or
+legacy managed MCP configuration. `execution.dispatch_admission` measures the
+final admission gate, including its nested `execution.budget_reservation` span.
+The admission span ends after the provider promise is handed off, not after the
+provider turn finishes. These spans use only the existing run hash. They close
+gaps between preparation and execution; their nested intervals are not additive.
+
 All preparation timing uses the endpoint gate, even when another library has
 registered a tracer provider. Tracer lookup, callback, status or ending failures
 cannot repeat work or replace its result or error. Automatic database children
@@ -250,11 +304,12 @@ attempt or owning phase:
 | Span family | Measured work |
 | --- | --- |
 | `workspace.transaction`, `.entry`, `.commit`, `.rollback` | Transaction lifetime, connection acquisition plus BEGIN, and settlement after the callback returns. Entry cannot distinguish pool wait from BEGIN. |
-| `workspace.provenance_lock`, `workspace.row_lock` | The awaited advisory-lock statement and current workspace row read with its row lock. |
-| `workspace.sources.*` | Source inventory queries, canonicalization, one filesystem alias scan, repository scan, and configured project scan. |
-| `workspace.readers`, `workspace.readers.*`, `workspace.access.*` | Retained-reader groups, identity, trust, project and source authorization, privacy and inventory reads. |
-| `workspace.provenance`, `workspace.notification`, `workspace.write` | Preserved ownership, notification statements, and record writes. |
-| `workspace.materialize.*`, `workspace.checkout.*` | Private source-directory setup and identity verification, existing checkout lookup, Git credential resolution, clone, requested-ref checkout, and atomic publication. The enclosing `heartbeat.prepare.workspace_source_materialize` includes the complete source-materialization path. |
+| `workspace.row_lock` | Current workspace row read with its row lock. |
+| `workspace.sources.inventory`, `workspace.access.*` | Current selected-record reads, task/run identity, current task and selected-project authorization, and selected-source trust. The execution check is separate from full workspace-record disclosure. |
+| `workspace.repository.*` | Repository admission binding and policy revalidation, receipt reads/writes, catalog access, filesystem preparation, directory publication lock boundaries, ownership verification, and Git inspection. See the nested admission hierarchy below. |
+| `authorization.base`, `.responsible_user`, `.authorizing_user`, `.task_privacy`, `.project_privacy` | The existing base decision, responsible/authorizing-user intersections, and applicable app-record privacy decisions beneath `workspace.access.task_authorization` or `workspace.access.authorization`. These details are scoped to workspace authorization. |
+| `workspace.notification`, `workspace.write` | Notification statements and record writes. |
+| `workspace.materialize.*`, `workspace.checkout.*` | Private source-directory setup and identity verification, existing checkout lookup, Git credential resolution, clone, optional pristine-object cache lookup/publication (`cache_lookup`, `cache_publish`), requested-ref checkout, and atomic publication. The enclosing `heartbeat.prepare.workspace_source_materialize` includes the complete source-materialization path. |
 | `runtime_selection.*` | Completion contracts, session/recovery reads, profiles, interaction materialization, backend discovery, bootstrap, run/coordinator writes, transaction entry/settlement, and workspace synchronization. |
 | `runtime_context.instructions`, `.skills`, `.mcp` | The three concurrent runtime-context branches. Their durations overlap. |
 | `runtime_context.asset_*` | Source reads, manifest hashing, cache lookup, cold materialization, and exact file verification on cold and warm paths. |
@@ -268,6 +323,8 @@ attempt or owning phase:
 | `connectors.browser_use.resolve`, `connectors.speko.resolve`, `connectors.slack.resolve`, `connectors.agentmail.resolve` | Each sequential connector resource resolver beneath configuration or native-controller assignment resolution. Empty/denied assignments still have measurable work. |
 | `connectors.browser_use.connection`, `.catalog`, `.grant` | Browser Use candidate reads, the full authorized catalog listing currently used to discover Browser Use resources, and grant checks. The catalog can contain work for other connectors. |
 | `connectors.discovery.scheduled`, `.queue`, `.build`, `.agent`, `.connections`, `.github`, `.slack`, `.speko`, `.policy`, `.on_demand_policy` | Discovery scheduler lifetime and wait, catalog construction, agent validation, descriptor sources, and policy decisions. Queued work retains the initiating run's trace context even when another run releases the scheduler slot. |
+| `connectors.github.catalog`, `.connections`, `.grants`, `.grant_members`, `.membership`, `.refresh`, `.credentials`, `.repositories`, `.grant_lock`, `.grant_write`, `.webhooks` | Authorized GitHub catalog construction, current connection/grant reads, credential and metadata refresh, repository pagination, grant transaction row lock/write, and parallel webhook binding calls. |
+| `connectors.github.refresh.transaction`, `.entry`, `.commit`, `.rollback` | The existing managed-grant refresh transaction and settlement. Entry combines connection acquisition and BEGIN. |
 | `connectors.slack.candidates`, `.authority`, `.profile`, `.settings`, `.identity`, `.credentials`, `.revision` | Slack endpoint enumeration, authority revalidation, enabled profile, settings, accepted requester provenance, credential reads and authorization revision. |
 | `connectors.slack.authority.transaction*`, `connectors.slack.catalog.transaction*`, `connectors.slack.catalog.lock`, `.entries`, `.write`, `.profile` | Slack authority and catalog transaction entry/settlement, advisory lock, catalog reads/updates and existing-profile lookup. Entry combines pool acquisition and BEGIN; it does not isolate pool wait. |
 | `execution.runtime` | Runtime dispatch, usage, workspace finalization and runtime cleanup; this includes work after provider execution. |
@@ -277,16 +334,143 @@ attempt or owning phase:
 | `response.resolve`, `.authorize`, `.add_comment`, `.transaction*`, `.row_lock`, `.write`, `.publish` | Response selection, existing authorization, comment transaction including commit or rollback, row wait, insert, and external publication enqueue. |
 | `execution.realtime` | Synchronous live-event and plugin publication dispatch. It does not measure browser receipt or paint. |
 
-Detail phases emit at most 16 spans of each name per attempt. Larger reader and
+Detail phases emit at most 16 spans of each name per attempt. Larger receipt and
 asset inventories continue under the containing group without unbounded per-row
-or per-file spans. Work, query order, authorization, and locks are unchanged.
+or per-file spans. Adding detail spans does not itself change work, query order,
+authorization, or locks.
 Manual transaction and dispatch boundaries retain their actual lifetime.
 Asset writes and verification may add only non-negative integer
 `paperclip.execution.fileCount` and `paperclip.execution.bytes` attributes.
 The closed keys are declared in `EXECUTION_PREPARATION_SPAN_ATTRS` in
 `packages/adapter-utils/src/acpx-engine/startup-timing.ts`.
-Other execution phases carry only the existing hashed run ID; manual boundaries
-have no attributes. Exceptions set status without exporting their messages.
+Repository checkout cache phases also carry the closed
+`paperclip.execution.repositoryCache.outcome` value: `disabled`, `hit`, `miss`,
+`published`, `already_present`, `contended`, `capacity`, `budget`, `invalid`, or `error`.
+The clone span carries the boolean
+`paperclip.execution.repositoryCache.reference_supplied`, including `false` for
+a fallback clone. A lookup hit means a validated cache was found, and supplying
+a reference does not prove Git avoided a download. These attributes carry no
+cache keys, remote URLs, paths, refs, credentials, or error text.
+
+Pristine repository-object cache version 2 mirrors the fresh checkout's refs,
+including remote-tracking refs. Version 1 copied their objects into a bare
+repository but omitted the remote-tracking tips. Git could then download those
+objects again during negotiation. The version is part of the cache key, so the
+first checkout creates a new generation and later checkouts can reuse its tips.
+Existing generations remain under the same storage limits. Cached refs stay
+private to the company and credential scope. Task checkouts still authenticate
+online, use the current remote refs, and dissociate their objects from the cache.
+
+Other execution phases, including manual boundaries, carry only the existing
+hashed run ID. Exceptions set status without exporting their messages.
+
+#### Repository admission
+
+Repository preparation keeps repeated current-identity and permission checks
+visible. An existing ready checkout still validates its receipt, origin, pin,
+current binding and acquisition authority. A ready checkout can omit clone work
+while retaining catalog, database, filesystem and Git inspection work.
+
+The hierarchy folds those operations beneath the admission that initiated them:
+
+```text
+heartbeat.prepare.workspace_repository_admission
+  workspace.repository.binding                     (repeated at publication boundaries)
+    workspace.repository.db.issue / db.workspace / db.run
+    workspace.repository.paths                     (when the destination must be checked)
+    workspace.repository.current_policy
+      workspace.repository.db.agent / db.project / db.run
+    workspace.access.execution
+      workspace.access.task_read / agent_read / run_read
+      workspace.access.task_authorization
+        authorization.base / responsible_user / authorizing_user / task_privacy
+      workspace.access.workspace_read / source_read / projects_read
+      workspace.access.authorization               (selected project)
+        authorization.base / responsible_user / authorizing_user / project_privacy
+      workspace.access.trust
+        workspace.access.trust.project_read
+  workspace.repository.receipts
+  workspace.repository.paths
+  workspace.repository.catalog
+    connectors.github.catalog                      (when GitHub catalog access is needed)
+      connectors.github.connections / grants / grant_members / membership
+      connectors.github.refresh                    (managed grant, including existing retry)
+        connectors.github.credentials
+        connectors.github.repositories             (metadata and repository pagination)
+        connectors.github.refresh.transaction
+          connectors.github.refresh.transaction.entry
+          connectors.github.grant_lock / grant_write
+          connectors.github.refresh.transaction.commit / rollback
+        connectors.github.webhooks                 (existing parallel binding calls)
+      connectors.github.credentials / repositories (legacy or unmanaged connection)
+  workspace.repository.fs_prepare
+    workspace.repository.ignore_rules
+  workspace.repository.publication                  (one per concrete receipt)
+    workspace.repository.lock_wait
+    workspace.repository.critical_section
+      workspace.repository.checkout_identity
+      workspace.repository.state_write
+      workspace.repository.ownership_read / ownership_verify
+      workspace.repository.acquisition             (repeated current acquisition check)
+        workspace.repository.db.issue / db.workspace
+        workspace.repository.current_policy
+      workspace.repository.materialize
+        workspace.checkout.lookup
+        workspace.checkout.git_auth / git_clone / git_ref / publish (cold path only)
+      workspace.repository.git_origin / git_branch / git_commit
+      workspace.repository.binding                 (same current checks as above)
+      workspace.repository.ownership_write / state_write
+    workspace.repository.lock_release
+```
+
+Optional branches appear only when the corresponding existing operation runs.
+The first binding check precedes the receipt lookup; an empty receipt list returns
+without catalog, path, staging or publication work. Later binding and acquisition
+checks revalidate current authority rather than authorizing historical readers.
+The retired filesystem-history inventory, root-policy reservations and reader
+authorization phases are no longer part of admission.
+
+Catalog groups retain the existing sequential connection processing and any
+credential refresh or pagination it requires. The initial four catalog reads
+can overlap, as can webhook-binding requests. Automatic HTTP spans, when enabled,
+sit beneath the owning credential, repository-metadata or webhook group. They
+do not require a separate execution-attempt root. `credentials` includes its
+existing secret/credential lookup and any OAuth refresh; `repositories` includes
+the whole metadata or token-repository listing, rather than one invented span
+per repository. No repository list or credential value is attached to a custom
+span.
+
+Database read/write spans measure the complete awaited client operation. Their
+duration can include pool acquisition, driver and network time, database work,
+and database lock waits. They do not by themselves identify a slow SQL plan or
+prove a pool wait. `lock_wait` instead measures the directory publication helper
+up to entry into its callback, including canonicalization and lock acquisition.
+`critical_section` measures the callback after acquisition. `lock_release` starts
+after that callback settles and ends when the helper finishes releasing its
+lock. A callback failure marks the critical section and publication as failed;
+a successful release remains successful. These directory boundaries are not
+PostgreSQL pool or row-lock measurements.
+
+Parents include their children, so do not add binding, catalog or publication
+durations to their descendants. Repeated guards and concurrent HTTP requests
+must be read in timeline order. Detail names remain capped at 16 occurrences per
+attempt; later operations still execute under their enclosing group. A missing
+leaf after that cap, or absent automatic driver instrumentation, does not prove
+that no work occurred.
+
+The `authorization.*` details appear only inside a workspace task/project
+authorization group. Unrelated startup decisions do not emit those details or
+consume their per-attempt budget before repository admission reaches its current
+task checks.
+
+These additions use the existing opt-in OpenTelemetry path. With
+`OTEL_EXPORTER_OTLP_ENDPOINT` unset or blank they perform the original work
+without consulting a tracer, even if a provider is globally registered. They add
+no Telemetry events, run-log writes or span-attribute keys. The closed attribute
+allowlist above remains unchanged: no raw SQL, paths, company/task/workspace or
+receipt IDs, repository URLs, refs, credentials, request bodies or error text.
+Tracer failures must preserve the original result or error and must not replay
+authorization, writes, Git commands or lock callbacks.
 
 A committed comment transaction establishes durable server storage. A publication
 enqueue establishes pending delivery, and realtime dispatch establishes a server
@@ -294,6 +478,28 @@ notification call. None establishes browser paint or external delivery. The atte
 can continue through later bookkeeping and resource cleanup. A later recovery
 invocation has its own attempt; this does not manufacture one continuous trace
 across queueing, process restarts, or an unavailable controller.
+
+### Connector preparation work
+
+Run configuration resolves the four connector families concurrently and preserves
+registration order. Browser Use assignment reads only active Browser Use
+connections and their eligible catalog entries. It applies the same tool policy,
+grant, company, and restricted GitHub guest checks without joining the full tool
+discovery queue or resolving unrelated Slack, GitHub, and Speko tools.
+
+Native startup registers direct connector tool definitions from the run's pinned
+skills. It does not repeat assignment discovery. These definitions do not grant
+access: each invocation still resolves current assignments and enters the existing
+permission and approval gateway. A retained session may advertise a tool whose
+access was revoked; the call fails under the current authorization state.
+
+Slack assignment checks stored catalog hashes against the bundled definitions.
+A current catalog and existing profile need no catalog transaction or advisory
+lock. Current profile bindings and entries still determine availability, followed
+by one live task authority check. Missing or changed catalog definitions use the
+existing locked reconciliation path, with authority checks before and after the
+update. Disabled catalog entries and operator-removed bindings remain disabled.
+No authorization result is cached across calls.
 
 ### Reading a slow startup in Honeycomb
 
@@ -331,6 +537,17 @@ above still apply.
 
 
 ## Native Runner Trace Spans
+
+Provider-pack fallback staging separates `provider_pack.archive.verify`
+(controller archive identity), `provider_pack.archive.probe` (remote helper support),
+`provider_pack.archive.reuse` (copy and hash image files),
+`provider_pack.archive.verify_missing` (verify only layers needing upload),
+`provider_pack.archive.transfer` (compressed file
+transfer), and `provider_pack.archive.extract` (received hash check and extraction).
+They are children of the existing pack selection/upload path and also appear in
+the local run timing log. Their fixed names add no paths, credentials, or content
+attributes. The operator endpoint gate remains unchanged. Source installs without
+prebuilt archives retain the existing directory upload span.
 
 The native provider lifecycle emits one foldable OpenTelemetry trace, linked to
 the server attempt described above. This is
@@ -455,9 +672,10 @@ environment variables: `SENTRY_DSN_FRONTEND` for the browser and
 `SENTRY_DSN_BACKEND` for the server. Each variable is optional. A
 specific variable always wins for its own component; a legacy variable,
 `SENTRY_DSN`, supplies a component that has no specific value set. An
-empty string counts as absent for all three variables. SDK configuration uses
-built-in Sentry options only. It adds no `beforeSend` hook. The run-failure
-reporter selects reportable outcomes before calling the SDK, as described below.
+empty string counts as absent for all three variables. The server's `beforeSend`
+hook adds normal task and run navigation links to events with saved run context.
+The run-failure reporter selects reportable outcomes before calling the SDK,
+as described below.
 
 The server is inactive when the backend DSN resolves to `null`; then it
 imports no Sentry package. The browser is inactive when the front-end DSN
@@ -573,12 +791,15 @@ loaded bundle, even if the server has since deployed another version.
 
 ### Privacy settings
 
-The feature uses built-in Sentry options only.
+Both runtimes use Sentry's privacy options. The server also adds saved-run
+navigation links through a bounded `beforeSend` hook.
 
 - `sendDefaultPii` is `false`, on both runtimes.
 - `tracesSampleRate` is `0`, on both runtimes. Paperclip sends no
   performance trace and no profile.
-- There is no `beforeSend` hook and no custom filter, on either runtime.
+- The server hook reads only saved run and company metadata for navigation.
+  It copies no request data and preserves the event if the lookup fails.
+  The browser adds no `beforeSend` hook. Neither runtime adds a custom filter.
 
 ### Server request data
 
@@ -624,7 +845,9 @@ backend Sentry DSN and the audited SDK. Set `PAPERCLIP_SENTRY_RUN_FAILURES` to:
 
 Missing, blank, or unrecognized values keep run reporting off. Expected operator
 stops, shutdown interruptions, successful runs, and queued work do not report in
-either enabled mode. The mode does not change run status, retries, recovery,
+either enabled mode. A native run that is `failed` while it waits for a same-run
+retry (`nativePhase` `retryable_failure`) does not report either. It reports once
+if a later write ends the retry as a terminal failure. The mode does not change run status, retries, recovery,
 Telemetry, or OpenTelemetry export. It is process-wide, so an operator can enable
 it on one staging instance without enabling it on other deployments. Restart the
 server after changing deployment environment variables.
@@ -651,6 +874,21 @@ Values with credentials, query parameters, fragments, or a path are omitted.
 The event never includes an API key or an access token. These references grant
 no access. A bot must authenticate to the correct instance and pass its existing
 company, run-output, and private-task access checks.
+
+Server events associated with a saved run also include `task_url` and `run_url`
+tags for the normal company-prefixed board pages, plus `task_identifier` when
+available. The `paperclip` context contains the same navigation links as
+`taskUrl` and `runPageUrl`; the existing `runUrl` remains an API reference.
+This enrichment applies to run failures, adapter Stop timeouts, and server errors
+with authenticated run context. It resolves the saved company, agent, and task
+instead of copying request URLs, queries, or bodies. Taskless runs receive only a
+run link. Missing or unsafe `PAPERCLIP_PUBLIC_URL` values omit these links.
+The optional indexed metadata lookup has a one-second reporting deadline and a
+limit of eight unfinished reads. A failed or slow lookup preserves the original
+event without navigation links.
+URLs longer than Sentry's 200-character tag limit remain in context only.
+Links require the viewer's normal Paperclip access and apply to newly captured
+events; existing Sentry events are not rewritten.
 
 The bot should use the exact run ID to read `GET /api/heartbeat-runs/{runId}`,
 `GET /api/heartbeat-runs/{runId}/events`, and
@@ -926,6 +1164,48 @@ counts; `acpPendingToolCount` keeps its finalization-time meaning. When tools ar
 pending, `acpPendingToolKinds` lists their ACP tool kinds as a sorted, comma-separated
 string drawn only from the closed ACP `ToolKind` enum plus `unknown`; the
 server drops the field if any other value appears.
+
+Claude ACP turns also run a stalled-tool watchdog. A pending tool call that gets
+no ACP update for 30 minutes (`stalledToolTimeoutSec`; kept at least 15 minutes
+above `MCP_TOOL_TIMEOUT` and `BASH_MAX_TIMEOUT_MS`) ends the turn through the
+same cancel and fail-fast deadline as a duplex channel loss. The run fails with
+`acpx_tool_stalled` instead of waiting for the wall-clock timeout, and records
+`acpStalledToolKind` (one closed `ToolKind` label or `unknown`) and
+`acpStalledToolSilentMs`. The stop-time fields above are measured when the
+watchdog fired. A live subagent's Task call keeps receiving heartbeats, so only
+a call that itself went silent trips the watchdog. A background subagent's Task
+call completes when the subagent starts, so the watchdog watches that subagent's
+own tool calls instead. Other ACP agents are watched only when
+`stalledToolTimeoutSec` is set.
+
+The engine also observes ACP permission requests without deciding them; ACPX's
+permission mode still decides each one. A stalled run records
+`acpStalledToolPermissionRequested` (whether the stalled call's permission
+request reached Paperclip) and `acpPendingToolPermissionRequestedCount` (how many
+pending calls had one). These fields record only that a request arrived, not
+that the reply reached the agent. A call whose request never arrived stalled
+before the request reached Paperclip. A call whose request arrived stalled
+later: on the reply's return trip, or after the agent received the decision.
+Both fields hold only a boolean and a count.
+
+A missing request is informative only if calls like it normally send one. So a
+stalled run also records `acpSettledSameKindToolCount` (how many finished calls
+of the stalled call's kind the run saw) and
+`acpSettledSameKindToolPermissionRequestedCount` (how many of those sent a
+permission request). These counts are supporting evidence, not proof of where
+the call stalled. The ACP kind is coarse, so peers of the same kind can be
+different tools with different permission rules. Read them this way:
+
+- All or nearly all finished peers sent a request, and the stalled call did not:
+  this supports a stall before the request reached Paperclip.
+- No finished peer sent a request: calls of that kind may skip the request, so
+  its absence on the stalled call says nothing about where it stalled.
+- Some finished peers sent a request and others did not: the counts do not show
+  whether the stalled call should have sent one. Compare the specific tools in
+  the run log before drawing a conclusion.
+- No finished peers (a count of zero): there is no comparison.
+
+Both fields hold only counts.
 
 ACP and legacy OpenCode results retain the adapter's resolved wall-clock timeout as
 `adapterExecutionTimeout` in the instance run result. Finalization uses it for
@@ -1367,13 +1647,20 @@ The `sandbox.startup` root span uses this closed attribute allowlist.
 | `paperclip.sandbox.startup.root.work_ms` | number  | no       | The sum of the step wall times.                            |
 | `paperclip.sandbox.startup.root.diff_ms` | number  | no       | `work_ms − wall_ms`; the overlap the parallel steps saved. |
 | `paperclip.sandbox.startup.provider`     | string  | yes      | The normalized provider family.                            |
-| `paperclip.sandbox.startup.cold_start`   | boolean | yes      | Whether the bring-up is a cold start.                      |
+| `paperclip.sandbox.startup.cold_start`   | boolean | yes      | Legacy value, set only when receipts establish cold or warm startup. |
+| `paperclip.sandbox.startup.warmth`       | string  | yes      | Receipt-derived `cold`, `warm`, `partial_reuse`, or `unknown`. |
 | `paperclip.sandbox.startup.region`       | string  | yes      | The clamped region label.                                  |
 | `paperclip.sandbox.startup.image_id`     | string  | yes      | The hashed image id.                                       |
 | `paperclip.sandbox.startup.sandbox_id`   | string  | yes      | The hashed sandbox id.                                     |
 | `paperclip.sandbox.startup.lease_id`     | string  | yes      | The hashed lease id.                                       |
 
 ### Step span attributes
+
+The root's warmth uses the per-layer receipts documented in
+[run-log-events.md](./run-log-events.md#startup-reuse-evidence). Partial and
+unknown evidence omit the legacy `cold_start` boolean. A reused session ID or
+runtime object alone cannot establish warmth. These attributes retain the
+operator OTLP endpoint gate and are no-operations without that endpoint.
 
 Each bring-up step span uses this closed attribute allowlist. The step name
 rides the span name, so no `step` attribute repeats it.
