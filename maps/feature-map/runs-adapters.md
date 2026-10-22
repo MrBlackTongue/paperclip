@@ -28,6 +28,9 @@ Open an agent’s model/adapter configuration or the instance adapter settings p
 ### `run-history`
 
 Open an agent run at `/agents/:agentId/runs/:runId` from the agent or task activity.
+The agent header has one Run now action. Administrators can enable
+Capture raw provider traces under the agent configuration’s Debugging section
+for future runs. The header shows Raw tracing on while that setting is enabled.
 
 For latency diagnosis with an operator OTLP endpoint, search the hashed run ID
 without restricting the root span name. Compare workspace preparation with its
