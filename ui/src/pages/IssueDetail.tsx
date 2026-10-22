@@ -3668,8 +3668,6 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     enabled: !!issueId,
     retry: 2,
   });
-  // Live updates refetch this on every company issue event; a single failed refetch
-  // must not lock the composer while the last known pause state is still available.
   const treeControlStateUnavailable = Boolean(treeControlStateError) && !treeControlState;
   const { data: activeRootPauseHolds = [] } = useQuery({
     queryKey: [
