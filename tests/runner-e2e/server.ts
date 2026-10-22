@@ -1,3 +1,4 @@
+import { parseFinalizationCrashBinding, readFinalizationCrashBoundary, type FinalizationCrashBinding } from "./finalization-crash-boundary.js";
 import { parseRestartRunnerIdentity, type RestartRunnerIdentity } from "./process-tree-owner.js";
 import { usesInstalledCli, verifyInstalledCli } from "./installed-cli.js";
 import { runnerMatrix } from "./catalog.js";
@@ -252,6 +253,7 @@ async function waitForHealthToStop() {
 interface RestartRequest {
   requestId: string;
   preserveRunner?: RestartRunnerIdentity;
+  crashAfterResult?: FinalizationCrashBinding;
 }
 
 async function readRestartRequest(): Promise<RestartRequest | null> {
@@ -278,13 +280,17 @@ async function readRestartRequest(): Promise<RestartRequest | null> {
     return null;
   }
   const preserveRunner = (value as { preserveRunner?: unknown }).preserveRunner;
-  return { requestId, ...(preserveRunner === undefined ? {} : { preserveRunner: parseRestartRunnerIdentity(preserveRunner) }) };
+  const crashAfterResult = (value as { crashAfterResult?: unknown }).crashAfterResult;
+  if (crashAfterResult !== undefined && preserveRunner !== undefined) throw new Error("A finalization crash cannot preserve a running provider");
+  return { requestId, ...(preserveRunner === undefined ? {} : { preserveRunner: parseRestartRunnerIdentity(preserveRunner) }),
+    ...(crashAfterResult === undefined ? {} : { crashAfterResult: parseFinalizationCrashBinding(crashAfterResult) }) };
 }
 
 async function writeRestartAck(
   requestId: string,
   status: "ready" | "failed",
   message?: string,
+  crashBoundary?: Awaited<ReturnType<typeof readFinalizationCrashBoundary>>,
 ) {
   const temporaryAckPath = `${restartAckPath}.${process.pid}.tmp`;
   await writeFile(
@@ -294,18 +300,25 @@ async function writeRestartAck(
       status,
       completedAt: new Date().toISOString(),
       ...(message ? { message } : {}),
+      ...(crashBoundary ? { crashBoundary } : {}),
     })}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
   await rename(temporaryAckPath, restartAckPath);
 }
 
-async function restartServer({ requestId, preserveRunner }: RestartRequest) {
+async function restartServer({ requestId, preserveRunner, crashAfterResult }: RestartRequest) {
   activeRestartRequestId = requestId;
   appendLog(`\nRestart request ${requestId}: stopping Paperclip\n`);
   const previous = child;
   if (!previous) throw new Error("No Paperclip server is available to restart");
-  if (preserveRunner) await stopServer.forRestart(previous, preserveRunner);
+  const crashBoundary = crashAfterResult ? await readFinalizationCrashBoundary(async route => {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { signal: AbortSignal.timeout(5_000), cache: "no-store" });
+    if (!response.ok) throw new Error("Finalization crash boundary could not be read");
+    return response.json();
+  }, crashAfterResult) : undefined;
+  if (crashBoundary) await stopServer.crashForRestart(previous);
+  else if (preserveRunner) await stopServer.forRestart(previous, preserveRunner);
   else await stopServer(previous);
   if (child === previous) child = null;
   // Do not mistake an orphaned old server for a healthy replacement. The port
@@ -321,7 +334,7 @@ async function restartServer({ requestId, preserveRunner }: RestartRequest) {
   if (shutdownRequested()) {
     throw new Error("Wrapper shutdown interrupted the Paperclip restart");
   }
-  await writeRestartAck(requestId, "ready");
+  await writeRestartAck(requestId, "ready", undefined, crashBoundary);
   appendLog(`Restart request ${requestId}: Paperclip is healthy\n`);
   activeRestartRequestId = null;
 }

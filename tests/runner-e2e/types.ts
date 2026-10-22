@@ -22,6 +22,8 @@ export type RunnerTaskFlow =
   | "task_workspaces"
   | "automatic_repository"
   | "repository_verification"
+  | "finalization_recovery"
+  | "followup_stop_resume"
   | "repository_skills"
   | "provider_connection"
   | "plan_task_guidance"
@@ -293,6 +295,12 @@ export interface RunnerE2EResult {
     sha: string | null;
     ref: string | null;
     workflowRunUrl: string | null;
+  };
+  dependableWork?: {
+    campaignId: string;
+    cell: import("./dependable-qualification.js").DependableCell;
+    phase: "candidate" | "staging";
+    evidence: Omit<import("./dependable-qualification.js").DependableAttempt["evidence"], "manifestVerified" | "secretScanPassed">;
   };
   rankingSnapshot?: {
     snapshotId: string;

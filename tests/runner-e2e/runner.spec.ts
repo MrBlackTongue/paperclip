@@ -1,3 +1,7 @@
+import { captureFollowupStopFailureApiState } from "./followup-stop-evidence.js";
+import { runFollowupStopResumeFlow } from "./followup-stop-resume-flow.js";
+import { runFinalizationRecoveryFlow } from "./finalization-recovery-flow.js";
+import type { FinalizationCrashBinding } from "./finalization-crash-boundary.js";
 import { runCaseHandoffsFlow } from "./case-handoffs-flow.js";
 import { runCaseReceiptFlow } from "./case-receipt-flow.js";
 import { runTaskWorkspacesFlow } from "./task-workspaces-flow.js";
@@ -254,6 +258,7 @@ async function restartIsolatedPaperclipServer(input: {
   requestId: string;
   deadlineAt: number;
   preserveRunner?: RestartRunnerIdentity;
+  crashAfterResult?: FinalizationCrashBinding;
 }): Promise<void> {
   const {
     controlDirectory,
@@ -264,7 +269,8 @@ async function restartIsolatedPaperclipServer(input: {
   const temporaryRequestPath = `${requestPath}.${process.pid}.${input.requestId}.tmp`;
   await writeFile(
     temporaryRequestPath,
-    JSON.stringify({ requestId: input.requestId, ...(input.preserveRunner ? { preserveRunner: input.preserveRunner } : {}) }),
+    JSON.stringify({ requestId: input.requestId, ...(input.preserveRunner ? { preserveRunner: input.preserveRunner } : {}),
+      ...(input.crashAfterResult ? { crashAfterResult: input.crashAfterResult } : {}) }),
     { encoding: "utf8", mode: 0o600 },
   );
   await rename(temporaryRequestPath, requestPath);
@@ -755,6 +761,13 @@ for (const execution of executions) {
 
     const captureFailureApiState = async () => {
       if (!fixtures) return;
+      if (execution.task.flow === "followup_stop_resume") {
+        const captured = await captureFollowupStopFailureApiState({ api, companyId: fixtures.company.id,
+          agentId: fixtures.agent.id, issueId: issue?.id,
+          evidence: (name, value) => writeSanitizedJson(snapshotsDir, name, value, secrets) });
+        if (captured) { issue = captured.issue as IssueRecord; selectedRuns = captured.runs as RunRecord[]; }
+        return;
+      }
       if (companyRunFlow && !issue) {
         const companyRuns = await api.get<RunRecord[]>(`/api/companies/${fixtures.company.id}/heartbeat-runs?limit=100`);
         selectedRuns = await Promise.all(companyRuns.map(run => api.get<RunRecord>(`/api/heartbeat-runs/${run.id}`)));
@@ -1024,6 +1037,25 @@ for (const execution of executions) {
           matcherResults,
         }, secrets);
         await captureScreenshot("final-state", "Final visible task state", "final-state.png");
+      } else if (execution.task.flow === "followup_stop_resume") {
+        const journey = await runFollowupStopResumeFlow({ page, api, fixtures, execution, nonce, workspacePath: workspacePath!, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `followupStopResume.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
+      } else if (execution.task.flow === "finalization_recovery") {
+        const journey = await runFinalizationRecoveryFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          restart: binding => restartIsolatedPaperclipServer({ api, requestId: `finalization-${nonce}`, deadlineAt: startedAtMs + deadlineMs, crashAfterResult: binding }),
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `finalizationRecovery.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
       } else if (execution.task.flow === "repository_verification") {
         const journey = await runRepositoryVerificationFlow({ page, api, fixtures, execution, nonce, workspacePath: workspacePath!, temporaryRoot,
           deadlineAt: startedAtMs + deadlineMs - 30_000,

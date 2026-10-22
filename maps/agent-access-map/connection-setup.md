@@ -114,6 +114,22 @@ remaining operations before qualifying the whole capability.
 Gaps: An initiation endpoint exists; it is not authorization to complete the person's
 credential flow.
 
+Braintrust uses the existing setup/request path for US and EU OAuth and API-key
+methods. OAuth requests only `mcp`; provider authorization follows the selected
+account's permissions. Personal invocation credentials must belong to their
+user, while shared identities use company credentials. Region and explicit
+method survive resume and reconnect. Agents use assigned tools through the
+run-scoped gateway and receive no Braintrust token. See
+[Braintrust](../../doc/connections/BRAINTRUST.md) for method keys and the
+qualification matrix. Separate live US OAuth proof passed browser authorization,
+49-tool discovery, bounded read, synthetic dataset insert/readback through actual
+process-agent runs and gateway sessions, catalog refresh, OAuth reconnect, local
+removal, post-removal denial, and structural API/log redaction. US API-key and
+both EU methods remain `not-run` against real accounts. Live token expiry/refresh,
+remote OAuth revocation, and native CLI automatic capability delivery remain
+unqualified. Public metadata probes performed no registration or account
+authorization; fixtures do not establish live proof for the remaining methods.
+
 Daytona native setup uses an organization API key in the selected personal or
 company vault grant. It does not borrow sandbox-provider credentials or CLI
 login tokens. Agents use assigned provider tools through the normal run-bound

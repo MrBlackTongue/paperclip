@@ -1,5 +1,39 @@
 # Paid runner full-stack E2E
 
+## Dependable-work qualification checkpoint
+
+`dependable-qualification.ts` defines the six everyday journeys across Codie
+and Claude, through Paperclip and Slack: 24 cells. The checkpoint requires three
+fresh candidate passes per cell, followed by a staging pass for that cell. It
+compares the recorded source, start/end serving revisions, model, effective
+settings hash, production instructions hash, case definition, and runner artifact.
+Repeated tasks or runs cannot count as fresh attempts. Each journey requires
+its independent durable-state, output, rendered-conversation, and delivery checks.
+An agent's success prose cannot satisfy these checks.
+
+Set `PAPERCLIP_DEPENDABLE_QUALIFICATION_MANIFEST` to a private JSON file matching
+`DependableQualification` when generating the ordinary Product E2E report. It
+writes `dependable-qualification.json` beside the existing report and makes an
+incomplete checkpoint fail that report command. The checkpoint reads the entire
+retained attempt pool before best-attempt selection. Failed attempts and missing
+observer receipts remain visible after later successes. Duplicate receipts make
+the checkpoint incomplete while preserving report output. Qualification also
+requires every manifest-listed proof file to exist inside its attempt directory;
+missing files, symlinks, and unsafe paths cannot count as inspected evidence. The ordinary report's
+costs, timings, evidence scanning, and attempt records remain authoritative.
+
+The observer receipt is typed and validated as `RunnerE2EResult.dependableWork`;
+it contains no credentials or provider prose. `dependableDailyExecutions` returns
+four exact execution IDs per UTC day, rotating all cells in six days. It refuses
+to start the rotation until all 24 exact journeys exist in the catalog. The existing bounded operations
+manifest and shared journal must own spending and scheduling; this checkpoint
+does not start work, retry it, or create a second scheduler.
+
+The complete journey registrations and staging/Slack observers are still being
+implemented. Existing development cells do not emit qualifying observer receipts
+and do not count toward this checkpoint. A green support test is calibration of
+the checkpoint, not a live qualification result.
+
 ## Automatic repository continuation
 
 The explicit-only `automatic-repository` suite is an early repair check for
@@ -64,6 +98,92 @@ ID for a bounded check:
 ```sh
 pnpm test:e2e:runner -- --id legacy-conversion.runner-codex.local.convert-and-deliver --max-automatic-retries 0
 pnpm test:e2e:runner -- --id automatic-repository-configured-models.runner-codex.local.automatic-repository-resume --max-automatic-retries 0
+```
+
+## Stop and task resumption
+
+The explicit-only `followup-stop-resume` suite has two local development cells
+using the configured Codex and Claude models and production hire instructions.
+It independently seeds a context file, verifies the first active checkpoint,
+sends one ordinary follow-up, presses Stop in the composer, and records an
+acknowledged cancelled run with no automatic path for at least five seconds.
+A later ordinary user message resumes the same task without restating the
+context or changed label. One successor must preserve workspace, instructions,
+and tool contract, and deliver an independently checked browser download.
+Missing an active boundary fails the attempt. These API-key development cells
+do not qualify staging subscription authentication, warm reuse, or Slack.
+
+```sh
+pnpm test:e2e:runner -- --list --suite followup-stop-resume
+pnpm test:e2e:runner -- --id followup-stop-resume.runner-codex.local.followup-stop-resume --max-automatic-retries 0
+```
+
+Before native selection, the observer verifies the existing task and context
+bindings while the native task ID is still unset. Every present task ID must
+agree. A checkpoint still requires the selected native run and its owned provider
+turn. The checkpoint poll treats invalid, duplicate, corrupt, or unauthorized
+evidence as a permanent attempt failure. An artifact that is not registered yet may wait.
+The final result opens its actual attachment chip and downloads through the file
+tab. The delivery observer separates server-receipted progress and generated file
+preparation from final replies. File preparation needs its exact applied receipt
+and independently read attachment-to-comment, task, and run binding. An ordinary
+extra reply still fails; matching wording alone cannot hide it.
+Both inner and outer failure captures use the same closed lifecycle fields.
+They do not put prompt, provider text, configuration, or logs into api-state.json.
+
+## Finalization recovery
+
+The explicit-only `finalization-recovery` suite has two development cells on
+Daytona: Codex `gpt-6.1-sol` and Claude `claude-opus-5-5`. It uses the production
+hire instructions and one provider admission. A 64 MiB random data file makes
+real workspace export observable; a small registered JSON proof records its
+original size, hash and reference before the interruption.
+
+The observer requires a saved native result and a running workspace-finalization
+operation. The isolated server wrapper rechecks that boundary through public
+APIs, then kills only its previously observed process tree without graceful
+shutdown. This includes the attempt's embedded database; no shared service or
+remote sandbox receives the process signal. Restart uses the same persisted
+instance. A crash outside the required phase or a missed interruption window
+fails; ordinary shutdown and completed work cannot substitute for this fault.
+
+A pass requires recovery of the interrupted workspace operation, the unchanged
+accepted-result digest and original artifact, independently hashed restored
+binary bytes, no additional provider turn or admission, and exactly one final
+reply matched to its delivery receipt and visible download. API reads and
+allowlisted lifecycle evidence stay in the existing report pipeline. The flow
+uses no private Runner hook or direct database write. These API-key/per-turn
+checks do not qualify deployed staging, warm reuse, or Slack delivery. One
+attempt has 1,000-cent company and agent hard stops; the binary is retained in
+the fixture workspace, not uploaded as a deliverable.
+
+```sh
+pnpm test:e2e:runner -- --list --suite finalization-recovery
+pnpm test:e2e:runner -- --id finalization-recovery.runner-codex.daytona.preserve-result-on-restart --max-automatic-retries 0
+```
+
+## Necessary free-text question
+
+The explicit-only `necessary-question` suite has four development cells: the
+recorded Codex and Claude models, on local and Daytona environments. It requests
+one essential booking reference that only the test user knows. The browser must
+show the actual free-text prompt and its explanation, then submit the real answer.
+The oracle checks the unchanged question, its server-owned provider or semantic
+receipt, the exact stored user answer, and one bound continuation. The saved
+confirmation must contain that answer exactly. The final reply's link must open
+that same task document and display its confirmation.
+A title, success claim, replacement card, duplicate wake, or uncommitted result
+cannot establish a pass.
+
+This extends the existing continuation flow and keeps the older question suites
+unchanged. It uses production hire instructions, one attempt, one or two provider
+admissions, and 1,000-cent company and agent budgets. API-key authentication and
+per-turn lifecycle remain explicit development differences. It does not qualify
+Slack, staging subscription credentials, warm reuse, or the complete checkpoint.
+
+```sh
+pnpm test:e2e:runner -- --list --suite necessary-question
+pnpm test:e2e:runner -- --id necessary-question.runner-codex.local.necessary-free-text --max-automatic-retries 0
 ```
 
 ## Latency observation bounds
@@ -2536,9 +2656,9 @@ env -u DATABASE_URL -u DATABASE_MIGRATION_URL pnpm exec playwright test --config
 This covers record browsing, not agent execution. Use the cells below for the
 same-task agent workflow.
 
-The suite has three separately selectable local Codex cells. Receipt smoke has
-both an API-key profile and a subscription profile; the original arithmetic
-workflow remains subscription-only.
+The suite has four separately selectable local Codex cells. Receipt smoke and
+the reusable arithmetic workflow each have an API-key profile and a subscription
+profile. Each cell retains its own single-attempt bound.
 
 | Cell | Durable result | Work-run bounds |
 |---|---|---|
@@ -2608,3 +2728,18 @@ pnpm test:e2e:runner -- --id case-handoffs.runner-codex-subscription.local.same-
 
 The suite is excluded from `--all`. Its presence is not live qualification;
 inspect the packaged attempt evidence and normal Product E2E report.
+
+The `same-task-roundtrip` arithmetic cell now creates two reusable name-and-prompt
+workflows through production APIs and kicks off using `workflowId`. Its existing
+four-phase journey adopts A → B → A, then preserves A. Every phase reads the
+effective task document and persists its distinct procedure marker; the oracle
+requires the captured workflow identities and effective revision references.
+Case Work and expanded history show the names and arbitrary phases. This changes
+the definition/grader digest; historical passes do not qualify this extension.
+The receipt cells continue exercising inline kickoff compatibility. Provider-turn,
+timeout, credentials and cleanup bounds are unchanged.
+
+The arithmetic journey records four delivered agent handoffs and one completed
+terminal intent. The final case is `done` at handoff version 5, while the same
+four provider work runs and unchanged workflow document revision finish the task.
+The oracle rejects a missing or pending terminal intent.

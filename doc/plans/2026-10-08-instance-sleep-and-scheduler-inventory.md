@@ -620,12 +620,16 @@ Longer polling intervals alone do not complete an item.
   malformed/unpersisted spool entries. Source:
   [heartbeat.ts](../../server/src/services/heartbeat.ts), `sweepPendingCleanupLeases`.
 
-- [ ] **JOB-18 — Adapter login and setup-token reapers.** Current: **30s**
-  durable-session/lease scans, alongside local one-shot timers. Change: register
-  actual expiry and cleanup retry times. **Complete when:** abandoned logins and
-  interrupted teardown still release sandboxes across restart, without scans
-  when no obligations exist. Source:
-  [index.ts](../../server/src/index.ts), adapter and setup-token reaper wiring.
+- [x] **JOB-18 — Adapter login and setup-token reapers.** Replaced the default
+  **30s** empty scans with commit-aware workers, session/promotion expiry
+  deadlines, and retries for concrete failed cleanup. Existing session and lease
+  rows remain authoritative; no queue table was added. Startup reconstructs work,
+  and drain retains deferred generations. Tagged orphan recovery protects live
+  acquisitions and includes terminal/missing-session orphans. Local-subscription
+  rows remain owned by their separate worker. General failed-acquisition spool
+  recovery and host-sleep blockers are unchanged. See
+  [idle-login-cleanup.md](../idle-login-cleanup.md) for producer coverage,
+  verification and remaining provider-orphan boundaries.
 
 - [ ] **JOB-19 — Custom-image setup expiry.** Current: **30s** active-session
   expiry scans. Change: register `expiresAt` and cleanup attempts. **Complete

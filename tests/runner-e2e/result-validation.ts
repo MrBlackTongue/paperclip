@@ -1,6 +1,7 @@
 import { connectionCheckpoints, connectionEvidencePasses, connectionRunSignals } from "./connection-evidence.js";
 import { STARTUP_REUSE_LAYERS, STARTUP_REUSE_REASONS } from "../../packages/adapter-utils/src/startup-reuse.js";
 import type { RunnerE2EResult } from "./types.js";
+import { DEPENDABLE_CELLS } from "./dependable-qualification.js";
 
 type Rule = (value: unknown, at: string) => void;
 const invalid = (at: string): never => {
@@ -8,6 +9,10 @@ const invalid = (at: string): never => {
 };
 const string: Rule = (value, at) => {
   if (typeof value !== "string") invalid(at);
+};
+const matching = (pattern: RegExp): Rule => (value, at) => {
+  string(value, at);
+  if (!pattern.test(value as string)) invalid(at);
 };
 const number: Rule = (value, at) => {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
@@ -53,6 +58,10 @@ const shape =
     for (const [key, rule] of Object.entries(fields))
       rule((value as Record<string, unknown>)[key], `${at}.${key}`);
   };
+const closedShape = (fields: Record<string, Rule>): Rule => (value, at) => {
+  shape(fields)(value, at);
+  for (const key of Object.keys(value as object)) if (!Object.hasOwn(fields, key)) invalid(`${at} (unexpected field)`);
+};
 const date: Rule = (value, at) => {
   string(value, at);
   if (!Number.isFinite(Date.parse(value as string))) invalid(at);
@@ -215,6 +224,13 @@ const fields = {
   issueId: optional(string),
   issueIdentifier: optional(nullable(string)),
   runIds: optional(array(string)),
+  dependableWork: optional(closedShape({
+    campaignId: matching(/^[A-Za-z0-9_.-]{1,120}$/), cell: oneOf(...DEPENDABLE_CELLS), phase: oneOf("candidate", "staging"),
+    evidence: closedShape({ definitionHash: matching(/^[a-f0-9]{64}$/), settingsHash: matching(/^[a-f0-9]{64}$/),
+      instructionsHash: matching(/^[a-f0-9]{64}$/), runnerArtifact: matching(/^sha256:[a-f0-9]{64}$/),
+      revisionAtStart: matching(/^[a-f0-9]{40}$/), revisionAtEnd: matching(/^[a-f0-9]{40}$/),
+      target: oneOf("isolated-candidate", "isolated-staging") }),
+  })),
   latencyProbes: optional(array(latencyProbe)),
   startupReuse: optional(array(shape({
     runId: string,

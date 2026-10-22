@@ -1,3 +1,4 @@
+import { canonicalNativeRuntimeContextDigest } from "../contracts/runtime-context.js";
 import { acpxProfileActivity } from "../drivers/acpx/profile-activity.js";
 import { redactObservabilityDiagnostic } from "../drivers/agent-observability.js";
 import { appendSemanticToolReceipt, readNativeSemanticReceipt, semanticInputSha256 } from "../drivers/semantic-tool-receipt.js";
@@ -1128,6 +1129,23 @@ describe("qualified ACPX runtime sidecar", () => {
       });
     },
   );
+
+  it("routes assigned MCP through PRP in the actual restricted Claude open dispatcher", async () => {
+    const sidecar = startSidecar(), model = "claude-sonnet-5", digest = "a".repeat(64);
+    const snapshot = { prompt: { revision: "fixture", text: "Instructions", digest: createHash("sha256").update("Instructions").digest("hex") },
+      instructions: { entryPath: "AGENTS.md", bundle: { schema: "paperclip.runtime-asset.v1" as const,
+        rootPath: "/unused", digest, manifestDigest: digest, fileCount: 0, totalBytes: 0 } },
+      skills: [], mcp: { assignmentSetId: "assigned", digest, bindingId: "assigned-run" } };
+    sidecar.write(initializeRequest(1, "claude", model));
+    expect(await sidecar.next(frame => frame.id === 1)).toMatchObject({ ok: true });
+    sidecar.write({ protocolVersion: ACPX_SIDECAR_PROTOCOL_VERSION, id: 2, command: "session.open",
+      params: { runtimeDirectory: "/unused", workingDirectory: "/", normalizedSessionId: "assigned-open",
+        agent: "claude", model, permissionMode: "deny-all", providerPolicy: { readOnly: true }, systemInstructions: "Instructions",
+        runtimeContext: { ...snapshot, aggregateDigest: canonicalNativeRuntimeContextDigest(snapshot) },
+        tools: [{ name: "assigned_lookup", inputSchema: { type: "object" } }] } });
+    expect(await sidecar.next(frame => frame.id === 2)).toMatchObject({ ok: false,
+      error: { message: "ACPX working directory must be a non-root directory" } });
+  });
 
   it.each(["off", "low", "high", "max"])(
     "accepts Pi thinking level %s through the actual session.open dispatcher",

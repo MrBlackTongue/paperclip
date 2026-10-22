@@ -1933,19 +1933,40 @@ agent conversion are outside this playbook.
 
 ## Paperclip Runner Adapter Conversion
 
-Paperclip Runner offers native Codex, OpenCode, and **ACPX Claude**. New
+Paperclip Runner offers native Codex, OpenCode, **ACPX Claude**, and **ACPX Pi**. New
 Claude Code agents default to ACPX Claude on Apple Silicon, Intel Mac, Linux x64
-and Linux ARM64 with supported glibc. Unsupported or unqualified targets retain
-Legacy. Darwin SSH keeps an automatic Legacy default; explicit native execution
+and Linux ARM64 with supported glibc. New OpenCode and Pi agents default to their native
+runtimes on Apple Silicon, Intel Mac, and Linux x64 with supported glibc;
+Linux ARM64 remains Legacy until the pinned runtimes support it.
+Unsupported or unqualified targets retain Legacy. Claude over Darwin SSH keeps
+an automatic Legacy default; explicit native execution
 requires matching remote assets. The runner override is in Advanced. Ordinary Claude models default to `claude-opus-5-5`; explicit models
-and provider routing remain authoritative. Existing agents keep their saved runner. Converting an existing Claude, Codex, or OpenCode agent selects its
+and provider routing remain authoritative. Existing agents keep their saved runner. Converting an existing Claude, Codex, OpenCode, or Pi agent selects its
 corresponding provider, preserves compatible models, credentials, workspace,
 and instructions, and resets execution sessions while retaining run history.
 Other adapters require an explicit provider choice. Legacy ACPX Codex agent
 settings normalize to native Codex on configuration updates and before fresh
 runs; immutable run descriptors remain readable. The **Paperclip Runner**
-experimental setting applies to other native providers. Native Codex and ACPX
-Claude do not require it. Company access checks still apply.
+experimental setting applies to other native providers. Native Codex, OpenCode,
+ACPX Claude, and ACPX Pi do not require it. Company access checks still apply.
+
+OpenCode requires an explicit `provider/model` before testing or finishing setup.
+An inactive setup draft can be saved before choosing a model. Automatic native
+selection uses `allow` permissions and a `per_turn` lifecycle. Native `ask` and
+`deny` policies remain available in agent configuration. Legacy custom commands,
+extra arguments, model variants, and inherited permission rules require the
+Legacy runner; incompatible settings return remediation instead of being ignored.
+Saved OpenCode agents keep their runner and runtime policies.
+
+Pi also requires an explicit `provider/model` before testing or hiring; inactive
+setup drafts may precede model selection. Install its pinned runtime on the
+execution host with `paperclipai runtime setup pi` before testing the connection.
+The native default uses `approve-all` permissions, `per_turn` lifecycle, and
+`low` thinking. Exact native thinking levels are `off`, `low`, `high`, and `max`.
+Legacy `minimal`, `medium`, and `xhigh` thinking, custom commands/arguments, and
+raw stdout mode require Legacy. Switching back to Legacy rejects native `max`
+thinking, nondefault permission policy, or warm lifecycle instead of discarding
+them. Existing Pi agents retain their saved runner and native policies.
 
 Agent configuration uses the same section layout across adapters: model and
 provider belong to **Adapter**, environment variables have their own section,

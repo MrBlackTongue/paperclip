@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import express from "express";
 import request from "supertest";
 import {
@@ -977,6 +978,70 @@ describeEmbeddedPostgres("tool access service", () => {
     }
     return false;
   }
+
+  it.each(["pages", "rfc8693"] as const)("mints %s tokens over real HTTP and records upstream failures without token material", async (protocol) => {
+    vi.stubEnv("PAPERCLIP_TOKEN_BROKER_ALLOWED_HOSTS", "127.0.0.1");
+    const received: Array<{ authorization: string | undefined; body: string }> = [];
+    let failExchange = false;
+    const server = createServer(async (incoming, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+      received.push({ authorization: incoming.headers.authorization, body: Buffer.concat(chunks).toString() });
+      response.writeHead(failExchange ? 503 : 200, { "content-type": "application/json" });
+      response.end(JSON.stringify(failExchange
+        ? { error: "temporarily_unavailable" }
+        : { access_token: "real-http-child-token", expires_in: 600, scope: "pages:publish:ns/dotta" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const company = await createCompany(db);
+      const agent = await createAgent(db, company.id);
+      const { run } = await createIssueAndRun(db, company.id, agent.id);
+      const port = (server.address() as { port: number }).port;
+      const { connection } = await createBrokerConnection(db, company.id, {
+        tokenUrl: `http://127.0.0.1:${port}/exchange`, protocol,
+      });
+      await allowConnectionForAgent(db, company.id, agent.id, connection.id);
+      const app = createRouteApp(db, agentJwtActor(company.id, agent.id, run.id));
+      const mint = () => request(app)
+        .post(`/api/agents/me/connections/${connection.id}/token`)
+        .send({ scope: "pages:publish:ns/dotta" });
+      const result = await mint();
+      expect(result.status).toBe(200);
+      expect(result.body).toMatchObject({ status: "minted", token: "real-http-child-token", scope: ["pages:publish:ns/dotta"] });
+      expect(received).toHaveLength(1);
+      if (protocol === "pages") {
+        expect(received[0].authorization).toBe("Bearer parent-deploy-token");
+        expect(JSON.parse(received[0].body)).toMatchObject({ namespace: "dotta", actor: { id: agent.id, runId: run.id, onBehalfOf: "user:user-for-run" } });
+      } else {
+        const form = new URLSearchParams(received[0].body);
+        expect(form.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+        expect(form.get("subject_token")).toBe("parent-deploy-token");
+        expect(form.get("scope")).toBe("pages:publish:ns/dotta");
+      }
+      failExchange = true;
+      const failed = await mint();
+      expect(failed.status).toBe(502);
+      expect(failed.body).toMatchObject({ code: "upstream_error" });
+      expect(received).toHaveLength(2);
+      const issuances = await db.select().from(connectionTokenIssuances)
+        .where(eq(connectionTokenIssuances.connectionId, connection.id));
+      expect(issuances).toHaveLength(2);
+      expect(issuances.find(row => row.outcome === "success")).toMatchObject({
+        tokenHash: createHash("sha256").update("real-http-child-token").digest("hex"),
+        companyId: company.id, agentId: agent.id, runId: run.id,
+      });
+      expect(issuances.find(row => row.outcome === "upstream_error")).toMatchObject({ tokenHash: null, errorCode: "upstream_error" });
+      const audits = await db.select().from(toolAccessAuditEvents)
+        .where(eq(toolAccessAuditEvents.connectionId, connection.id));
+      const persisted = JSON.stringify({ issuances, audits });
+      expect(persisted).not.toContain("parent-deploy-token");
+      expect(persisted).not.toContain("real-http-child-token");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
 
   it("mints generic exchange connection tokens through the agent route and stores only hashes", async () => {
     const company = await createCompany(db);
@@ -6435,6 +6500,52 @@ describeEmbeddedPostgres("tool access service", () => {
         actor,
       }),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("connects Ditto with a workspace API key sent with the token scheme", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    const fetchMock = mockToolsList([
+      { name: "search_ditto_text" },
+      { name: "translate_text_items" },
+      { name: "delete_text_items" },
+    ]);
+
+    const result = await service.connectGalleryApp(
+      company.id,
+      {
+        galleryKey: "ditto",
+        connectionMethodKey: "mcp-api-key",
+        credentialValues: { "credentials.authorization": "ditto-test-secret" },
+      },
+      { actorType: "user", actorId: "board" },
+    );
+
+    // Ditto rejects the Bearer scheme for API keys; it expects `token <key>`.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.dittowords.com/v2/mcp",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "token ditto-test-secret",
+        }),
+      }),
+    );
+    expect(result.connection).toMatchObject({
+      authKind: "api_key",
+      config: {
+        url: "https://api.dittowords.com/v2/mcp",
+        sourceTemplateKey: "ditto",
+        connectionMethodKey: "mcp-api-key",
+      },
+    });
+    expect(JSON.stringify(result.connection.config)).not.toContain("ditto-test-secret");
+    expect(result.catalog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ toolName: "search_ditto_text", riskLevel: "read", status: "active" }),
+        expect.objectContaining({ toolName: "translate_text_items", riskLevel: "write", status: "active" }),
+        expect.objectContaining({ toolName: "delete_text_items", riskLevel: "destructive", status: "active" }),
+      ]),
+    );
   });
 
   it("connects Superagent with an organization API key sent as a bearer header", async () => {
@@ -20132,6 +20243,35 @@ describe("classifyRisk", () => {
     expect(classifyRisk({ name: "validate_agent_rule", annotations: { readOnlyHint: true } }, "superagent")).toBe("read");
     // Without the provider rule, the generic classifier treats these as reads.
     expect(classifyRisk({ name: "triage_finding" })).toBe("read");
+  });
+
+  it("classifies Ditto translate, link and unlink tools as writes", () => {
+    for (const name of [
+      "get_styleguide_rules",
+      "suggest_edit",
+      "search_ditto_text",
+      "list_projects",
+      "list_variants",
+      "get_workspace_tags",
+    ])
+      expect(classifyRisk({ name }, "ditto")).toBe("read");
+    for (const name of [
+      "translate_text_items",
+      "translate_library_components",
+      "link_figma_nodes_to_text_item",
+      "link_text_items_to_component",
+      "unlink_text_items_from_component",
+      "publish_library_component",
+      "create_text_items",
+      "update_styleguide_rules",
+    ])
+      expect(classifyRisk({ name }, "ditto")).toBe("write");
+    for (const name of ["delete_text_items", "delete_styleguide_rules", "delete_variants"])
+      expect(classifyRisk({ name }, "ditto")).toBe("destructive");
+    expect(classifyRisk({ name: "list_projects", annotations: { readOnlyHint: false } }, "ditto")).toBe("write");
+    // Without the provider rule, the generic classifier treats these as reads.
+    expect(classifyRisk({ name: "translate_text_items" })).toBe("read");
+    expect(classifyRisk({ name: "link_text_items_to_component" })).toBe("read");
   });
 
   it("classifies Enterpret run_graph_query as write despite readOnlyHint", () => {

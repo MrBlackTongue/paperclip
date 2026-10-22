@@ -2,6 +2,7 @@ import { priorRecoveryApiReceipt } from "../recovery-effect-receipts.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { caseHandoffService } from "../case-handoffs.js";
 import { caseIdForApiCapture, createNativeCaseSchema, executeNativeCaseTool, NATIVE_CASE_OPERATIONS } from "./native-case-tools.js";
+import { executeNativeWorkflowTool } from "./native-workflow-tools.js";
 import { assertNoCaseHandoffMutation } from "../heartbeat/case-handoff-lifecycle.js";
 import { handoffCaseSchema } from "@paperclipai/shared";
 import { skillAccessService } from "../skill-access.js";
@@ -351,6 +352,7 @@ export class PaperclipRunnerToolAuthority {
         } },
         ...create.kickoff,
         workflow_document_text: create.workflow_document_text,
+        ...(create.workflowId !== undefined ? { workflowId: create.workflowId } : {}),
         ...(create.initialDocuments !== undefined ? { initialDocuments: create.initialDocuments } : {}),
       } : call.arguments;
       return caseHandoffService(this.db).handoff(this.binding.companyId, this.#privacyActor(run), handoffCaseSchema.parse(request), {
@@ -559,6 +561,12 @@ export class PaperclipRunnerToolAuthority {
       throw new Error("paperclip_runner_tool_mode_denied");
     }
     switch (call.tool) {
+      case "list_workflows":
+      case "read_workflow":
+      case "create_workflow":
+      case "update_workflow":
+        return executeNativeWorkflowTool({ db: this.db, binding: this.binding, tool: call.tool, arguments: call.arguments,
+          callApi: (receiptKey, request) => this.#callApi(receiptKey, request, { dedicatedCaseTool: call.tool }) });
       case "read_case":
       case "update_case":
         if (context.issue.workMode !== "standard") throw forbidden("Case tools require standard work mode");
@@ -849,9 +857,9 @@ export class PaperclipRunnerToolAuthority {
     const { input, operation } = validateRunnerApiCall(value, context);
     // Only the strict dedicated case adapter may use its exact mapped route when
     // generic API discovery/calls are disabled. All route/run guards still apply.
-    const dedicatedCaseRoute = options && ["read_case", "update_case"].includes(options.dedicatedCaseTool)
+    const dedicatedCaseRoute = options && NATIVE_CASE_OPERATIONS.has(options.dedicatedCaseTool)
       && operation.dedicatedTools.includes(options.dedicatedCaseTool)
-      && input.pathParams?.id === options.caseId
+      && (options.dedicatedCaseTool.endsWith("workflow") || options.dedicatedCaseTool === "list_workflows" || input.pathParams?.id === options.caseId)
       && this.binding.casesEnabled === true && bound.issue.workMode === "standard";
     const assertAvailable = (workMode: string) => {
       if (options && workMode !== "standard") throw forbidden("Case tools require standard work mode");

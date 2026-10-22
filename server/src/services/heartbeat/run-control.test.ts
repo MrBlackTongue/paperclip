@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, agentWakeupRequests, caseEvents, caseHandoffs, cases, companies, environmentLeases, heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { activityLog, agents, agentWakeupRequests, caseEvents, caseHandoffs, cases, companies, environmentLeases, heartbeatRuns, issueComments, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { eq, inArray } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runningProcesses } from "../../adapters/index.js";
@@ -19,6 +19,7 @@ import { createHeartbeatRunControl } from "./run-control.js";
 import { preserveCancelledNativeWorkspaces } from "../native-runtime/native-failed-workspace-recovery.js";
 import { createPostgresRunDispatchAdapter } from "../../modules/run-dispatch/adapters/postgres.js";
 import { caseHandoffService } from "../case-handoffs.js";
+import { withQueuedCommentIdsInWakePayload } from "../issue-queued-comment-queue.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueService } from "../issues.js";
 import { callbacks, runControlPostgresSupport, setupRunControlDatabase } from "./__tests__/run-control-fixtures.js";
@@ -426,6 +427,43 @@ describe.skipIf(!runControlPostgresSupport.supported)("heartbeat run-control dat
     await issueService(db).update(f.issue.id, { status: "done" });
     expect((await db.select().from(cases).where(eq(cases.id, f.caseRow.id)))[0])
       .toMatchObject({ status: "done", phase: "done", completedAt: expect.any(Date) });
+  });
+
+  it("keeps pre-Stop input pending until a later user message authorizes one continuation", async () => {
+    const { company, agent } = await fixture();
+    const [issue] = await db.insert(issues).values({ companyId: company.id, title: "Retain my direction after Stop",
+      status: "in_progress", assigneeAgentId: agent.id }).returning();
+    const runId = randomUUID(), stoppedAt = new Date();
+    const [run] = await db.insert(heartbeatRuns).values({ id: runId, companyId: company.id, agentId: agent.id,
+      nativeIssueId: issue.id, runtimeMode: "native", status: "cancelled", finishedAt: stoppedAt, processPid: 2_000_000_000,
+      resultJson: { cancelledByActorType: "user", cancelledByUserId: "operator", nativeCancellation: {
+        schema: "paperclip.native-cancellation.v1", runId, companyId: company.id, issueId: issue.id,
+        scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+        intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID(),
+      } },
+    }).returning();
+    await db.insert(nativeRunFinalizations).values({ runId, companyId: company.id, issueId: issue.id,
+      phase: "terminal_failure", failureCode: "native_retry_cancelled" });
+    const [earlier] = await db.insert(issueComments).values({ companyId: company.id, issueId: issue.id,
+      authorType: "user", authorUserId: "operator", body: "Keep my changed label", createdAt: new Date(stoppedAt.getTime() - 1000) }).returning();
+    const payload = (ids: string[]) => withQueuedCommentIdsInWakePayload({ issueId: issue.id, commentId: ids.at(-1),
+      _paperclipWakeContext: { issueId: issue.id, wakeReason: "issue_commented", wakeCommentId: ids.at(-1), wakeCommentIds: ids } }, ids);
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: company.id, agentId: agent.id,
+      source: "on_demand", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+      requestedByActorType: "user", requestedByActorId: "operator", payload: payload([earlier.id]) }).returning();
+    const deps = callbacks(db), control = createHeartbeatRunControl(db, deps);
+    await control.resumeRemoteStopComments(run);
+    expect(deps.enqueueWakeup).not.toHaveBeenCalled();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null });
+    const [later] = await db.insert(issueComments).values({ companyId: company.id, issueId: issue.id,
+      authorType: "user", authorUserId: "operator", body: "Resume the same task", createdAt: new Date(stoppedAt.getTime() + 1000) }).returning();
+    await db.update(agentWakeupRequests).set({ payload: payload([earlier.id, later.id]) }).where(eq(agentWakeupRequests.id, wake.id));
+    await control.resumeRemoteStopComments(run);
+    expect(deps.enqueueWakeup).toHaveBeenCalledExactlyOnceWith(agent.id, expect.objectContaining({ requestedByActorType: "user",
+      requestedByActorId: "operator", queuedCommentRequestId: wake.id,
+      payload: expect.objectContaining({ _paperclipWakeContext: expect.objectContaining({ wakeCommentIds: [earlier.id, later.id] }) }),
+    }), wake.id);
   });
 
   it.each(["ephemeral", "reuse_by_environment"] as const)("keeps %s cancellation eligible for retention when teardown loses the task lock", async leasePolicy => {

@@ -109,7 +109,7 @@ describe("durable Dot Runner integration", () => {
     expect(() => resolveNativeRuntimeMode(input)).toThrow("experimental settings");
     expect(resolveNativeRuntimeMode({ ...input, enabled: false, dotEnabled: true })).toMatchObject({ kind: "native", profile: { backend: "openai_dot_mcp" } });
     expect(() => resolveNativeRuntimeMode({ ...input, enabled: false, dotEnabled: true,
-      adapterConfig: { provider: "opencode", model: "openrouter/deepseek/deepseek-v4-flash-0731" },
+      adapterConfig: { provider: "acpx", acpxAgent: "grok", model: "anthropic/claude-sonnet-4-6" },
     })).toThrow("Paperclip Runner is experimental and disabled");
     expect(resolveHeartbeatNativeRuntimeMode({ ...input, enabled: false, dotEnabled: false,
       persisted: { runtimeMode: "native", runtimeModeReason: null, runtimeModeResolvedAt: new Date(), driverKind: "openai_dot_mcp" },

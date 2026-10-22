@@ -156,3 +156,33 @@ through the real service and prepares verified bytes on the reused task root,
 with only remote clone transport replaced by an owned local repository. The
 queued sixth campaign was cancelled during its build, before provider execution,
 when this review finding made that candidate an uninformative paid retry.
+
+
+The necessary-question journey now extends the existing continuation flow. Four
+explicit development cells require a visible free-text prompt and context, one
+real user answer retained on the unchanged question, an exactly bound provider
+resume or semantic successor, and an independently read exact saved confirmation
+with a visible link. Calibration preserves the existing continuation and question
+suites. These cells use production instructions and the recorded models, but
+retain explicit API-key/per-turn differences and do not count as Slack or staging
+qualification. Actual provider measurement is still required.
+
+
+## October 21 Stop qualification findings
+
+The corrected live observer reached a real active provider, saved the follow-up,
+received the matching Stop acknowledgement, and observed the required quiet
+interval. A later real resume message was saved but could not start work. The
+retained run has a complete priced receipt with accounting still pending.
+
+A real PostgreSQL regression reproduces the receipt-before-coordinator-closure
+race: the accounting worker goes idle before closure and is never signalled
+again. The repair adds accounting to that existing committed closure signal.
+It does not infer zero cost or relax budget admission. Partial receipts remain
+held; a later complete receipt settles one ledger entry without provider replay.
+
+A second real-database regression shows that the old queue path could admit a
+follow-up saved before Stop. The repaired native path, like the legacy path,
+requires a later user message while preserving earlier undelivered input.
+Both reproduced failures remain retained. Fresh actual-model acceptance and
+deployed staging proof remain required before closing these repairs.
