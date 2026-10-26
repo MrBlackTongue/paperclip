@@ -33,7 +33,10 @@ import { conversationNativeDecision, isConversation } from "../agent-conversatio
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { randomUUID } from "node:crypto";
 import { RESPONSIBLE_USER_DENIAL_CODES } from "@paperclipai/shared";
-import { normalizeResponsibleUserDenialCode } from "../responsible-user-denial-run-outcomes.js";
+import {
+  getRememberedResponsibleUserDenialForRun,
+  normalizeResponsibleUserDenialCode,
+} from "../responsible-user-denial-run-outcomes.js";
 import { preserveNativeWorkspaceExportLease } from "./native-workspace-export-resume.js";
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -1225,11 +1228,12 @@ export async function finalizeNativeRun(input: {
   }
   // A responsible-user denial recorded during the run fails it closed before
   // any status or continuation effect is planned: a successful result must not
-  // schedule another wake under the same unresolved responsible user.
+  // schedule another wake under the same unresolved responsible user. The
+  // in-process signal covers a denial whose durable marker writes both failed.
   const responsibleUserDenied = normalizeResponsibleUserDenialCode(
     await input.db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.errorCode),
-  ) !== null;
+  ) !== null || getRememberedResponsibleUserDenialForRun(run.id) !== null;
   const terminalState = responsibleUserDenied && reportedTerminalState === "succeeded"
     ? "failed"
     : reportedTerminalState;
