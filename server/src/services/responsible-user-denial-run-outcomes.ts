@@ -9,22 +9,24 @@ import { publishLiveEvent } from "./live-events.js";
 
 /**
  * The run id comes from a caller-supplied header, so a remembered denial is
- * bound to the agent and company that reported it. Finalization of a run owned
- * by anyone else never observes it.
+ * keyed by the run id together with the agent and company that reported it.
+ * Finalization of a run owned by anyone else never observes it, and a caller
+ * that supplies another agent's run id writes its own entry instead of
+ * replacing the owner's one.
  */
 export interface ResponsibleUserDenialRunOwner {
   agentId: string;
   companyId: string;
 }
 
-interface RememberedResponsibleUserDenial extends ResponsibleUserDenialRunOwner {
-  code: ResponsibleUserDenialCode;
-}
-
-const pendingResponsibleUserDenialsByRunId = new Map<
+const pendingResponsibleUserDenialsByRunKey = new Map<
   string,
-  RememberedResponsibleUserDenial
+  ResponsibleUserDenialCode
 >();
+
+function rememberedDenialKey(runId: string, owner: ResponsibleUserDenialRunOwner) {
+  return JSON.stringify([owner.companyId.trim(), owner.agentId.trim(), runId.trim()]);
+}
 
 /**
  * Upper bound on remembered denials. The run id comes from the caller, so the
@@ -77,17 +79,14 @@ export function rememberResponsibleUserDenialForRun(
   if (!RUN_ID_PATTERN.test(normalizedRunId) || !normalizedCode || !agentId || !companyId) {
     return null;
   }
-  pendingResponsibleUserDenialsByRunId.delete(normalizedRunId);
-  while (pendingResponsibleUserDenialsByRunId.size >= MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS) {
-    const oldest = pendingResponsibleUserDenialsByRunId.keys().next().value;
+  const key = rememberedDenialKey(normalizedRunId, { agentId, companyId });
+  pendingResponsibleUserDenialsByRunKey.delete(key);
+  while (pendingResponsibleUserDenialsByRunKey.size >= MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS) {
+    const oldest = pendingResponsibleUserDenialsByRunKey.keys().next().value;
     if (oldest === undefined) break;
-    pendingResponsibleUserDenialsByRunId.delete(oldest);
+    pendingResponsibleUserDenialsByRunKey.delete(oldest);
   }
-  pendingResponsibleUserDenialsByRunId.set(normalizedRunId, {
-    code: normalizedCode,
-    agentId,
-    companyId,
-  });
+  pendingResponsibleUserDenialsByRunKey.set(key, normalizedCode);
   return normalizedCode;
 }
 
@@ -96,18 +95,15 @@ export function getRememberedResponsibleUserDenialForRun(run: {
   agentId: string;
   companyId: string;
 }): ResponsibleUserDenialCode | null {
-  const remembered = pendingResponsibleUserDenialsByRunId.get(run.id.trim());
-  if (!remembered) return null;
-  if (remembered.agentId !== run.agentId || remembered.companyId !== run.companyId) {
-    return null;
-  }
-  return remembered.code;
+  return pendingResponsibleUserDenialsByRunKey.get(rememberedDenialKey(run.id, run)) ?? null;
 }
 
-export function clearRememberedResponsibleUserDenialForRun(
-  runId: string,
-): boolean {
-  return pendingResponsibleUserDenialsByRunId.delete(runId.trim());
+export function clearRememberedResponsibleUserDenialForRun(run: {
+  id: string;
+  agentId: string;
+  companyId: string;
+}): boolean {
+  return pendingResponsibleUserDenialsByRunKey.delete(rememberedDenialKey(run.id, run));
 }
 
 export async function recordResponsibleUserDenialOnActiveRun(

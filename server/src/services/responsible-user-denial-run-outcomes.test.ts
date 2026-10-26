@@ -54,7 +54,7 @@ describe("responsible-user denial run outcomes", () => {
     expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBe(
       "RESPONSIBLE_USER_UNAVAILABLE",
     );
-    expect(clearRememberedResponsibleUserDenialForRun(runId)).toBe(true);
+    expect(clearRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBe(true);
     expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBeNull();
   });
 
@@ -75,7 +75,25 @@ describe("responsible-user denial run outcomes", () => {
         companyId: "66666666-6666-4666-8666-666666666666",
       }),
     ).toBeNull();
-    clearRememberedResponsibleUserDenialForRun(runId);
+    clearRememberedResponsibleUserDenialForRun({ id: runId, ...owner });
+  });
+
+  it("does not let another agent replace the owner's remembered denial", () => {
+    const runId = "88888888-8888-4888-8888-888888888888";
+    const intruder = {
+      agentId: "99999999-9999-4999-8999-999999999999",
+      companyId: owner.companyId,
+    };
+    rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAUTHORIZED", owner);
+    rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAVAILABLE", intruder);
+    expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBe(
+      "RESPONSIBLE_USER_UNAUTHORIZED",
+    );
+    expect(clearRememberedResponsibleUserDenialForRun({ id: runId, ...intruder })).toBe(true);
+    expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBe(
+      "RESPONSIBLE_USER_UNAUTHORIZED",
+    );
+    clearRememberedResponsibleUserDenialForRun({ id: runId, ...owner });
   });
 
   it("does not remember a denial without an owner", () => {
@@ -112,7 +130,7 @@ describe("responsible-user denial run outcomes", () => {
       "RESPONSIBLE_USER_UNAUTHORIZED",
     );
     for (let index = 0; index < total; index += 1) {
-      clearRememberedResponsibleUserDenialForRun(runIdAt(index));
+      clearRememberedResponsibleUserDenialForRun({ id: runIdAt(index), ...owner });
     }
   });
 
