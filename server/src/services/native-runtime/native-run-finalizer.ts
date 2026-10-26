@@ -1233,7 +1233,7 @@ export async function finalizeNativeRun(input: {
   const responsibleUserDenied = normalizeResponsibleUserDenialCode(
     await input.db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.errorCode),
-  ) !== null || getRememberedResponsibleUserDenialForRun(run.id) !== null;
+  ) !== null || getRememberedResponsibleUserDenialForRun(run) !== null;
   const terminalState = responsibleUserDenied && reportedTerminalState === "succeeded"
     ? "failed"
     : reportedTerminalState;

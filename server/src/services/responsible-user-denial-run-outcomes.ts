@@ -7,9 +7,23 @@ import {
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 
-const pendingResponsibleUserDenialCodesByRunId = new Map<
+/**
+ * The run id comes from a caller-supplied header, so a remembered denial is
+ * bound to the agent and company that reported it. Finalization of a run owned
+ * by anyone else never observes it.
+ */
+export interface ResponsibleUserDenialRunOwner {
+  agentId: string;
+  companyId: string;
+}
+
+interface RememberedResponsibleUserDenial extends ResponsibleUserDenialRunOwner {
+  code: ResponsibleUserDenialCode;
+}
+
+const pendingResponsibleUserDenialsByRunId = new Map<
   string,
-  ResponsibleUserDenialCode
+  RememberedResponsibleUserDenial
 >();
 
 /**
@@ -54,30 +68,46 @@ export function normalizeResponsibleUserDenialCode(
 export function rememberResponsibleUserDenialForRun(
   runId: string,
   code: unknown,
+  owner: ResponsibleUserDenialRunOwner,
 ): ResponsibleUserDenialCode | null {
   const normalizedRunId = runId.trim();
   const normalizedCode = normalizeResponsibleUserDenialCode(code);
-  if (!RUN_ID_PATTERN.test(normalizedRunId) || !normalizedCode) return null;
-  pendingResponsibleUserDenialCodesByRunId.delete(normalizedRunId);
-  while (pendingResponsibleUserDenialCodesByRunId.size >= MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS) {
-    const oldest = pendingResponsibleUserDenialCodesByRunId.keys().next().value;
-    if (oldest === undefined) break;
-    pendingResponsibleUserDenialCodesByRunId.delete(oldest);
+  const agentId = owner.agentId.trim();
+  const companyId = owner.companyId.trim();
+  if (!RUN_ID_PATTERN.test(normalizedRunId) || !normalizedCode || !agentId || !companyId) {
+    return null;
   }
-  pendingResponsibleUserDenialCodesByRunId.set(normalizedRunId, normalizedCode);
+  pendingResponsibleUserDenialsByRunId.delete(normalizedRunId);
+  while (pendingResponsibleUserDenialsByRunId.size >= MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS) {
+    const oldest = pendingResponsibleUserDenialsByRunId.keys().next().value;
+    if (oldest === undefined) break;
+    pendingResponsibleUserDenialsByRunId.delete(oldest);
+  }
+  pendingResponsibleUserDenialsByRunId.set(normalizedRunId, {
+    code: normalizedCode,
+    agentId,
+    companyId,
+  });
   return normalizedCode;
 }
 
-export function getRememberedResponsibleUserDenialForRun(
-  runId: string,
-): ResponsibleUserDenialCode | null {
-  return pendingResponsibleUserDenialCodesByRunId.get(runId.trim()) ?? null;
+export function getRememberedResponsibleUserDenialForRun(run: {
+  id: string;
+  agentId: string;
+  companyId: string;
+}): ResponsibleUserDenialCode | null {
+  const remembered = pendingResponsibleUserDenialsByRunId.get(run.id.trim());
+  if (!remembered) return null;
+  if (remembered.agentId !== run.agentId || remembered.companyId !== run.companyId) {
+    return null;
+  }
+  return remembered.code;
 }
 
 export function clearRememberedResponsibleUserDenialForRun(
   runId: string,
 ): boolean {
-  return pendingResponsibleUserDenialCodesByRunId.delete(runId.trim());
+  return pendingResponsibleUserDenialsByRunId.delete(runId.trim());
 }
 
 export async function recordResponsibleUserDenialOnActiveRun(

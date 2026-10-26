@@ -466,6 +466,7 @@ describe("errorHandler", () => {
     expect(rememberResponsibleUserDenialForRunMock).toHaveBeenCalledWith(
       "run-1",
       "RESPONSIBLE_USER_UNAUTHORIZED",
+      { agentId: "agent-1", companyId: "company-1" },
     );
     expect(recordResponsibleUserDenialOnActiveRunMock).toHaveBeenLastCalledWith(db, {
       runId: "run-1",

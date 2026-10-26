@@ -415,7 +415,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     // The denial can be recorded only in memory when the durable write failed.
     const recordedResponsibleUserDenialCode =
       normalizeResponsibleUserDenialCode(latestRun?.errorCode) ??
-      getRememberedResponsibleUserDenialForRun(run.id);
+      getRememberedResponsibleUserDenialForRun(run);
     if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
       outcome = latestRun.status;
     } else if (recordedResponsibleUserDenialCode) {
@@ -481,8 +481,10 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : outcome === "cancelled"
           ? (latestRun?.errorCode ?? "cancelled")
           : outcome === "failed"
-            ? (adapterResult.errorCode ??
-              recordedResponsibleUserDenialCode ??
+            ? // A recorded denial decides the outcome, so it must also own the
+              // error code: retry paths key off it and must not restart the run.
+              (recordedResponsibleUserDenialCode ??
+              adapterResult.errorCode ??
               "adapter_failed")
             : null;
 
@@ -1084,7 +1086,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const recordedResponsibleUserDenialCode =
       normalizeResponsibleUserDenialCode(
         (await getRun(run.id).catch(() => null))?.errorCode,
-      ) ?? getRememberedResponsibleUserDenialForRun(run.id);
+      ) ?? getRememberedResponsibleUserDenialForRun(run);
     // The runtime resolution is scoped to the adapter try block. The
     // durable coordinator is also the stronger authority here: legacy
     // runs simply have no row, while native result-less exhaustion keeps
@@ -1337,7 +1339,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const recordedResponsibleUserDenialCode =
       normalizeResponsibleUserDenialCode(
         (await getRun(runId).catch(() => null))?.errorCode,
-      ) ?? getRememberedResponsibleUserDenialForRun(runId);
+      ) ?? getRememberedResponsibleUserDenialForRun(run);
     const nonRetryablePreflightCode =
       nonRetryablePreflightFailureCode(outerErr);
     const workspaceGitScanFailure = isWorkspaceGitScanError(outerErr) ? outerErr : null;

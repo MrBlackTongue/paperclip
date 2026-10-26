@@ -162,10 +162,15 @@ async function recordResponsibleUserDenialFromHttpError(
     return "failed";
   } catch (recordErr) {
     const agentId = req.actor?.type === "agent" ? req.actor.agentId ?? null : null;
+    const companyId = req.actor?.type === "agent" ? req.actor.companyId ?? null : null;
     // Once the primary durable write fails, establish an independent in-process
     // fail-closed signal before retrying. The adapter cannot observe this HTTP
-    // response and exit before the heartbeat finalizer can see that signal.
-    if (runId) rememberResponsibleUserDenialForRun(runId, code);
+    // response and exit before the heartbeat finalizer can see that signal. The
+    // signal is bound to the caller's agent and company, so a run id supplied by
+    // another caller cannot fail a run it does not own.
+    if (runId && agentId && companyId) {
+      rememberResponsibleUserDenialForRun(runId, code, { agentId, companyId });
+    }
     logger.error(
       { err: recordErr, runId: runId || null, agentId },
       "failed to record responsible-user denial on heartbeat run",
@@ -181,7 +186,7 @@ async function recordResponsibleUserDenialFromHttpError(
         await recordResponsibleUserDenialOnActiveRun(db, {
           runId,
           agentId,
-          companyId: req.actor?.type === "agent" ? req.actor.companyId ?? null : null,
+          companyId,
           code,
         });
       } catch (fallbackErr) {

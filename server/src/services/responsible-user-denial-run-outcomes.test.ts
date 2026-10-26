@@ -41,23 +41,61 @@ describe("responsible-user denial run outcomes", () => {
     expect(normalizeResponsibleUserDenialCode(null)).toBeNull();
   });
 
+  const owner = {
+    agentId: "22222222-2222-4222-8222-222222222222",
+    companyId: "33333333-3333-4333-8333-333333333333",
+  };
+
   it("remembers a denial until the run finalizer clears it", () => {
     const runId = "11111111-1111-4111-8111-111111111111";
     expect(
-      rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAVAILABLE"),
+      rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAVAILABLE", owner),
     ).toBe("RESPONSIBLE_USER_UNAVAILABLE");
-    expect(getRememberedResponsibleUserDenialForRun(runId)).toBe(
+    expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBe(
       "RESPONSIBLE_USER_UNAVAILABLE",
     );
     expect(clearRememberedResponsibleUserDenialForRun(runId)).toBe(true);
-    expect(getRememberedResponsibleUserDenialForRun(runId)).toBeNull();
+    expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBeNull();
+  });
+
+  it("does not expose a remembered denial to a run owned by another agent or company", () => {
+    const runId = "44444444-4444-4444-8444-444444444444";
+    rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAUTHORIZED", owner);
+    expect(
+      getRememberedResponsibleUserDenialForRun({
+        id: runId,
+        agentId: "55555555-5555-4555-8555-555555555555",
+        companyId: owner.companyId,
+      }),
+    ).toBeNull();
+    expect(
+      getRememberedResponsibleUserDenialForRun({
+        id: runId,
+        agentId: owner.agentId,
+        companyId: "66666666-6666-4666-8666-666666666666",
+      }),
+    ).toBeNull();
+    clearRememberedResponsibleUserDenialForRun(runId);
+  });
+
+  it("does not remember a denial without an owner", () => {
+    const runId = "77777777-7777-4777-8777-777777777777";
+    expect(
+      rememberResponsibleUserDenialForRun(runId, "RESPONSIBLE_USER_UNAUTHORIZED", {
+        agentId: "",
+        companyId: owner.companyId,
+      }),
+    ).toBeNull();
+    expect(getRememberedResponsibleUserDenialForRun({ id: runId, ...owner })).toBeNull();
   });
 
   it("ignores a run id that is not a UUID", () => {
     expect(
-      rememberResponsibleUserDenialForRun("not-a-run-id", "RESPONSIBLE_USER_UNAVAILABLE"),
+      rememberResponsibleUserDenialForRun("not-a-run-id", "RESPONSIBLE_USER_UNAVAILABLE", owner),
     ).toBeNull();
-    expect(getRememberedResponsibleUserDenialForRun("not-a-run-id")).toBeNull();
+    expect(
+      getRememberedResponsibleUserDenialForRun({ id: "not-a-run-id", ...owner }),
+    ).toBeNull();
   });
 
   it("keeps the remembered denials bounded, evicting the oldest first", () => {
@@ -65,12 +103,12 @@ describe("responsible-user denial run outcomes", () => {
       `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
     const total = MAX_REMEMBERED_RESPONSIBLE_USER_DENIALS + 5;
     for (let index = 0; index < total; index += 1) {
-      rememberResponsibleUserDenialForRun(runIdAt(index), "RESPONSIBLE_USER_UNAUTHORIZED");
+      rememberResponsibleUserDenialForRun(runIdAt(index), "RESPONSIBLE_USER_UNAUTHORIZED", owner);
     }
     for (let index = 0; index < 5; index += 1) {
-      expect(getRememberedResponsibleUserDenialForRun(runIdAt(index))).toBeNull();
+      expect(getRememberedResponsibleUserDenialForRun({ id: runIdAt(index), ...owner })).toBeNull();
     }
-    expect(getRememberedResponsibleUserDenialForRun(runIdAt(total - 1))).toBe(
+    expect(getRememberedResponsibleUserDenialForRun({ id: runIdAt(total - 1), ...owner })).toBe(
       "RESPONSIBLE_USER_UNAUTHORIZED",
     );
     for (let index = 0; index < total; index += 1) {

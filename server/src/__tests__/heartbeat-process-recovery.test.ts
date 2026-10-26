@@ -2222,6 +2222,40 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     },
   );
 
+  it("keeps the denial as the run error code when the adapter also reports a retryable failure", async () => {
+    const { companyId, agentId, runId } = await seedQueuedIssueRunFixture();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      rememberResponsibleUserDenialForRun(
+        runId,
+        "RESPONSIBLE_USER_UNAVAILABLE",
+        { agentId, companyId },
+      );
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "claude_max_turns",
+        errorMessage: "Turn limit reached after the denial.",
+        summary: "Stopped at the turn limit after a responsible-user denial.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId);
+    await heartbeat.waitForRunExecutionDrain(runId);
+
+    expect(await heartbeat.getRun(runId)).toMatchObject({
+      status: "failed",
+      errorCode: "RESPONSIBLE_USER_UNAVAILABLE",
+    });
+    expect(
+      await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId)),
+    ).toHaveLength(0);
+  });
+
   it("fails closed on a process-local denial when both durable marker writes fail", async () => {
     const { companyId, agentId, issueId, runId, wakeupRequestId } =
       await seedQueuedIssueRunFixture();
@@ -2229,6 +2263,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       rememberResponsibleUserDenialForRun(
         runId,
         "RESPONSIBLE_USER_UNAUTHORIZED",
+        { agentId, companyId },
       );
       return {
         exitCode: 0,
@@ -2251,7 +2286,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       status: "failed",
       errorCode: "RESPONSIBLE_USER_UNAUTHORIZED",
     });
-    expect(getRememberedResponsibleUserDenialForRun(runId)).toBeNull();
+    expect(getRememberedResponsibleUserDenialForRun({ id: runId, agentId, companyId })).toBeNull();
 
     const sourceIssue = await db
       .select()
