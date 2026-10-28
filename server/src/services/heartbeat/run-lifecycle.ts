@@ -1,3 +1,4 @@
+import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import os from "node:os";
 import {
@@ -193,7 +194,7 @@ type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 
 /** Lifecycle owns run writes; the service supplies reporting and admission effects. */
 export interface HeartbeatLifecycleDependencies extends Pick<ReturnType<typeof createHeartbeatRunState>,
-  "getRun" | "resolveSessionBeforeForWakeup" | "ensureRuntimeState">,
+  "getRunStatus" | "resolveSessionBeforeForWakeup" | "ensureRuntimeState">,
   Pick<ReturnType<typeof createHeartbeatRunPreparation>,
     "getIssueExecutionContext" | "resolveResponsibleUserIdForRunContext">,
   Pick<HeartbeatRetryDependencies, "getAgentInvokability"> {
@@ -244,6 +245,7 @@ const LIVENESS_BOOKKEEPING_EVENT_TYPES = [
 ];
 
 export const NON_RETRYABLE_PREFLIGHT_FAILURE_CODES = new Set<string>([
+  "project_access_denied",
   "low_trust_isolation_unavailable",
   "low_trust_requires_isolated_workspace",
   "low_trust_boundary_mismatch",
@@ -388,7 +390,7 @@ export function publishHeartbeatRunRuntimeProgress(status: {
 function recordHeartbeatRunRuntimeProgress(
   run: Pick<
     typeof heartbeatRuns.$inferSelect,
-    "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
+    "id" | "companyId" | "agentId" | "status"
   >,
   update: RuntimeStatusUpdate,
   issueId: string | null,
@@ -635,7 +637,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     issuesSvc,
     recovery,
     companySkills,
-    getRun,
+    getRunStatus,
     emitTerminalAgentTaskRun,
     getIssueExecutionContext,
     budgets,
@@ -992,7 +994,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
   async function recordCurrentHeartbeatRunRuntimeProgress(
     run: Pick<
       typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "agentId" | "status" | "contextSnapshot"
+      "id" | "companyId" | "agentId" | "status"
     >,
     update: RuntimeStatusUpdate,
     issueId: string | null,
@@ -1002,7 +1004,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       return null;
     }
 
-    const currentRun = await getRun(run.id);
+    const currentRun = await getRunStatus(run.id);
     if (!currentRun || !isHeartbeatRunRuntimeStatusActive(currentRun.status)) {
       clearHeartbeatRunRuntimeStatus(run.id);
       return null;
@@ -1018,6 +1020,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       const tx = transaction as unknown as Db;
       if (isHeartbeatRunTerminalStatus(status)) await notifyDeliveryWork(tx, DELIVERY_QUEUES.accounting, companyId);
       await notifyExecutionRunWork(tx);
+      if (companyId) await notifyChatRunMilestones(tx, { companyId });
       return write(tx);
     });
   }

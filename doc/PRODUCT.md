@@ -49,12 +49,23 @@ start execution. This preference does not change the org chart or permissions.
 
 ### Agent Execution
 
-Existing Claude and Codex agents can upgrade from the legacy runner on their
+Agents have an **Advanced** tab for editing their settings across all configuration tabs
+as a versioned YAML document. Instructions, skills, tools, channels, trust,
+secret operations, API keys, and revision restore use their existing domain APIs.
+It edits the same configuration as the regular settings pages, validates before saving, preserves masked secrets, and rejects
+stale edits. See [Agent configuration YAML](agent-configuration-yaml.md).
+
+Existing Claude, Codex, and Grok Build agents can upgrade from the legacy runner on their
 Harness / Runtime page when Paperclip Runner is the qualified default for their
 environment. One action saves pending edits and translates compatible settings
 while keeping the harness, selected model, account bindings, instructions, and
 history. Unsupported settings produce an actionable error without changing the
 saved agent. Future runs start fresh sessions.
+
+Qualifying an existing agent's sandbox for that upgrade uses the same agent
+configuration permission as saving the upgrade. The server checks the saved
+computer and its company binding. Company owners do not need instance-admin
+access for this step; general instance environment management remains restricted.
 
 Paperclip supports several ways to run an agent's heartbeat:
 
@@ -81,6 +92,12 @@ I am researching the Facebook ads Granola uses (current task)
 Tasks have parentage. Every task exists in service of a parent task, all the way up to the company goal. This is what keeps autonomous agents aligned — they can always answer "why am I doing this?"
 
 The current issue model includes stable issue identifiers, parent/sub-issues, blockers, a single assignee, comments, issue documents, attachments and work products, and review/approval handoffs. That structure keeps work inspectable by both the board and agents while still allowing agents to decompose work into smaller tasks.
+
+Automatic monitor checks pause when a task is blocked. A person can use Check now
+to request one check of a retained monitor through normal execution admission.
+Dependencies, recovery, pause, budgets and ownership still apply. Provider-usage
+recovery stays paused until the task resumes. A check that
+cannot start reports that result instead of claiming it was queued.
 
 The experimental Cases feature also supports persistent work records and
 prompt-driven agent handoffs. Native case creation requires kickoff and creates
@@ -135,6 +152,16 @@ participation. Open requests addressed to the person also admit the task until
 resolution. Ordinary human-created tasks keep their creator's participation.
 These rules apply to existing tasks, Mine, unread counts, badges, and task toasts.
 Approvals retain their existing recipient and permission rules.
+
+An advisory PR review does not require human completion approval because its
+rating is low, CI is pending or failing, or the PR is unmerged. After publication,
+the bot may stay in review with an authorized provider-event wait or a saved
+monitor. Neither wait enrolls a person in Mine. Human requests are for concrete
+dependencies of the assigned review, such as missing repository access.
+A later published review with no human dependency withdraws the same bot's
+earlier completion request for a published review when its result commits and
+independent gates are clear. Finish-report validation is read-only. Independent approval gates
+and requests without that review evidence remain unchanged.
 
 New inbound comments retain their provider in `metadata.sourceChannel`. Historical
 imports use inbound message links or the stored provider-sender metadata. These
@@ -376,3 +403,13 @@ operation logs retain their app authorization. Workspace `_issuePrivacySources` 
 operation privacy metadata protect app-record disclosure; they do not grant or deny
 filesystem execution or task-bound file browsing. Current trust and sandbox policy,
 publication receipts, binding checks, and lifecycle locks remain authoritative.
+
+## Agent connection administration (2026-10-13)
+
+Standard agents can configure connections through the same domain APIs used by the app, bounded by their grants and their responsible user's current authority. Fresh standard agents for default Operators can manage app/tool connections, chat/email channels, AI accounts and pools, profiles and gateways without additional grants. Existing grants are not backfilled; explicit restrictions persist. Gateway administration retains the responsible human's administrative permission and does not grant agents blanket `tools:admin`.
+
+The agent performs authorized setup, reuses saved accounts and drafts, and hands off only required human authentication, consent, credential entry or identity confirmation. Saved handoffs resume through existing task continuation after current authority is rechecked. Management, tool execution and approval remain separate. Private accounts, host commands and stored credentials retain their boundaries; agent-issued gateway clients preserve issuer and responsible-user restrictions at use time.
+
+Authorized policy administration includes user-requested changes that loosen the acting agent’s own tool controls. These writes remain bounded by management grants, resource scope and the responsible user’s current authority; they do not need an additional approval solely because the agent is a target. Subsequent tool calls obey the resulting policy. Agents cannot approve their own governed action requests or edit their own principal permission grants.
+
+The implementation, operation inventory, permission matrix and fixture qualification are recorded in [Agent API parity for connection configuration](plans/2026-10-13-connection-api-parity.md). Provider fixtures establish API behavior; they do not constitute live provider setup or an empirical agent-success claim.

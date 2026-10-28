@@ -64,6 +64,20 @@ instance run log and add no first-party Telemetry or OpenTelemetry export.
 
 ## Provider-pack preparation timing
 
+`run.performance.span` also records `task.time_to_first_token` once per native
+dispatch at the first newly committed deliverable text: assistant or reasoning
+`item.delta`/`item.completed`, a redaction tail released at completion, or an
+accepted run-result summary. Its
+`durationMs` starts at the native run trace's historical start (accepted ingress,
+otherwise queued run creation, or dispatch when history is absent) and ends at Core
+commit callback. `startOffsetMs` is zero, and `eventKind` is `agentMessage` or
+`reasoning`. It includes preparation and startup, but excludes browser
+delivery/rendering. This measures text availability, not an exact model token.
+Empty text, item starts, tools, usage, result proposals, and duplicate replay do
+not qualify. No deliverable text means no timing sample. A recovered dispatch can
+record newly committed output from the original start; it does not reproduce
+earlier output timing. The event contains no text or provider identifiers.
+
 The existing `run.performance.span` event also records `provider_pack.select`,
 `provider_pack.discover`, `provider_pack.verify`, `provider_pack.verify_preinstalled`,
 `provider_pack.link_preinstalled`, `provider_pack.clear_stale`, `provider_pack.upload`,
@@ -77,6 +91,14 @@ material. These events retain the existing schema and carry no paths or exceptio
 They also become native Observability spans only with an operator OTLP endpoint.
 
 ## Native PRP Run-Log Events
+
+Completed OpenCode builtin `bash` parts preserve the numeric process exit from
+`state.metadata.exit` in `tool.execution.completed.payload.exitCode`. The tool
+status stays `completed` even when the command exits with a nonzero code. This
+status describes completion of the tool call, not success of the command or the
+native run. Metadata adds an exit only when it is an integer. Conflicting supplied
+legacy exits stay unknown. Existing numeric `state.exit` values remain supported;
+metadata on other tools cannot add process-exit proof.
 
 `auth.credentials.updated` is a runner-produced PRP event for a change to a
 supported credential store, including account identity changes and later token
