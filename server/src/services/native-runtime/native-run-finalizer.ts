@@ -1230,10 +1230,11 @@ export async function finalizeNativeRun(input: {
   // any status or continuation effect is planned: a successful result must not
   // schedule another wake under the same unresolved responsible user. The
   // in-process signal covers a denial whose durable marker writes both failed.
-  const responsibleUserDenied = normalizeResponsibleUserDenialCode(
+  const responsibleUserDenialCode = normalizeResponsibleUserDenialCode(
     await input.db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, run.id)).then((rows) => rows[0]?.errorCode),
-  ) !== null || getRememberedResponsibleUserDenialForRun(run) !== null;
+  ) ?? getRememberedResponsibleUserDenialForRun(run);
+  const responsibleUserDenied = responsibleUserDenialCode !== null;
   const terminalState = responsibleUserDenied && reportedTerminalState === "succeeded"
     ? "failed"
     : reportedTerminalState;
@@ -1624,7 +1625,9 @@ export async function finalizeNativeRun(input: {
         : clearExecutionFailure
           ? sql`case when ${responsibleUserDenialRecorded()} then ${heartbeatRuns.error} else null end`
           : heartbeatRuns.error;
-      const projectedErrorCode = providerFailure ? sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`
+      const projectedErrorCode = responsibleUserDenialCode
+        ? sql`case when ${responsibleUserDenialRecorded()} then ${heartbeatRuns.errorCode} else ${responsibleUserDenialCode} end`
+        : providerFailure ? sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`
         : clearExecutionFailure
           ? sql`case when ${responsibleUserDenialRecorded()} then ${heartbeatRuns.errorCode} else null end`
           : heartbeatRuns.errorCode;
@@ -1654,6 +1657,7 @@ export async function finalizeNativeRun(input: {
           nativePhaseUpdatedAt: now,
           ...(clearExecutionFailure ? { error: projectedError, errorCode: projectedErrorCode } : {}),
           ...(providerFailure ? { error: projectedError, errorCode: projectedErrorCode } : {}),
+          ...(responsibleUserDenialCode ? { errorCode: projectedErrorCode } : {}),
           resultJson: projectedResult,
           updatedAt: now,
         })

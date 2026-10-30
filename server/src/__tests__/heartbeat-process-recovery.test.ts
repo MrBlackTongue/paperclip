@@ -275,6 +275,7 @@ import {
 } from "../services/recovery/index.ts";
 import { collectDispositionRepairSourceState } from "../services/recovery/disposition-repair.ts";
 import {
+  clearRememberedResponsibleUserDenialForRun,
   getRememberedResponsibleUserDenialForRun,
   rememberResponsibleUserDenialForRun,
 } from "../services/responsible-user-denial-run-outcomes.ts";
@@ -2958,12 +2959,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .toMatchObject({ status: "active", resolvedAt: null });
   });
 
-  it.each(["RESPONSIBLE_USER_UNAUTHORIZED", "RESPONSIBLE_USER_UNAVAILABLE"] as const)(
-    "keeps a %s denial failed when a successful native result is committed",
-    async (errorCode) => {
+  it.each([
+    { errorCode: "RESPONSIBLE_USER_UNAUTHORIZED", source: "durable" },
+    { errorCode: "RESPONSIBLE_USER_UNAVAILABLE", source: "durable" },
+    { errorCode: "RESPONSIBLE_USER_UNAUTHORIZED", source: "remembered" },
+    { errorCode: "RESPONSIBLE_USER_UNAVAILABLE", source: "remembered" },
+  ] as const)(
+    "keeps a $source $errorCode denial failed when a successful native result is committed",
+    async ({ errorCode, source }) => {
       const f = await seedPendingNativeFinalization();
-      await db.update(heartbeatRuns).set({ errorCode, error: "Responsible user denied the request" })
-        .where(eq(heartbeatRuns.id, f.runId));
+      if (source === "durable") {
+        await db.update(heartbeatRuns).set({ errorCode, error: "Responsible user denied the request" })
+          .where(eq(heartbeatRuns.id, f.runId));
+      } else {
+        rememberResponsibleUserDenialForRun(f.runId, errorCode, f);
+      }
       await db.insert(workspaceOperations).values({ companyId: f.companyId, issueId: f.issueId,
         heartbeatRunId: f.runId, phase: "workspace_finalize", status: "succeeded" });
       await expect(finalizeNativeRun({ db, runId: f.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true }))
@@ -2973,7 +2983,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       // The denial stops the run before any continuation wake is planned.
       expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, f.agentId)))
         .filter((wake) => wake.status === "queued")).toHaveLength(0);
-      // A later replay of the same committed result keeps the denial.
+      // Replay must rely on the saved code after the process-local signal is gone.
+      clearRememberedResponsibleUserDenialForRun({ id: f.runId, ...f });
       await finalizeNativeRun({ db, runId: f.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
       expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId)))[0])
         .toMatchObject({ status: "failed", errorCode });
