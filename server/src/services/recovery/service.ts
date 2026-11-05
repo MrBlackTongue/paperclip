@@ -2212,7 +2212,7 @@ export function recoveryService(
   }
 
   async function readInvocationBlock(
-    issue: typeof issues.$inferSelect,
+    issue: RecoveryIssue,
     agentId: string,
   ) {
     return budgets.getInvocationBlock(issue.companyId, agentId, {
